@@ -1,0 +1,98 @@
+# SR Segmentation Configuration
+
+# Device settings
+device: cuda  # cuda or cpu
+
+# Model paths (relative to project root or absolute)
+models:
+  speciesnet: models/speciesnet.pth
+  sam: models/sam_vit_h.pth
+  bisenet: models/bisenet_face_parsing.pth
+  person_detector: models/yolov8_person.pt
+
+# SAM (Segment Anything) settings
+sam:
+  model_type: vit_h  # vit_h, vit_l, vit_b
+  checkpoint: models/sam_vit_h.pth
+  points_per_side: 32
+  pred_iou_thresh: 0.88
+  stability_score_thresh: 0.95
+  crop_n_layers: 0
+  crop_n_points_downscale_factor: 1
+  min_mask_region_area: 100
+
+# SpeciesNet settings
+speciesnet:
+  confidence_threshold: 0.5
+  # Furry animal classes to detect (exclude birds, reptiles, fish, insects)
+  furry_classes:
+    - cat
+    - dog
+    - horse
+    - cow
+    - sheep
+    - rabbit
+    - bear
+    - fox
+    - wolf
+    - deer
+    - squirrel
+    - mouse
+    - rat
+    - hamster
+    - gerbil
+    - ferret
+    - weasel
+    - otter
+    - badger
+    - hedgehog
+    - llama
+    - alpaca
+    - goat
+    - pig
+
+# BiSeNet face parsing settings
+bisenet:
+  num_classes: 19  # Standard face parsing classes
+  pretrained: face_parser
+  # Class mapping:
+  # 0: background, 1: skin, 2: l_brow, 3: r_brow, 4: l_eye, 5: r_eye,
+  # 6: nose, 7: mouth, 8: u_lip, 9: l_lip, 10: hair
+
+# Person detection settings
+person_detector:
+  model: yolov8n
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+
+# Mask merging settings
+merging:
+  # Gaussian blur sigma for soft edges
+  gaussian_sigma: 3.0
+  # Edge blur radius for smooth blending
+  edge_blur_radius: 5
+  # Minimum hair/fur area to keep (pixels)
+  min_hair_area: 100
+
+# Processing settings
+processing:
+  max_image_size: 2048
+  batch_size: 1
+  # Enable half precision (FP16) for faster inference
+  use_fp16: false
+
+# Output settings
+output:
+  save_masks: true
+  save_visualization: true
+  output_dir: output
+  # Save intermediate results for debugging
+  save_intermediate: false
+
+# Dataset settings (for PR5)
+dataset:
+  images_dir: data/images
+  masks_dir: data/masks
+  train_split: 0.8
+  # Classes: 0=background, 1=hair_fur, 2=face, 3=skin, 4=vegetation
+  num_classes: 5

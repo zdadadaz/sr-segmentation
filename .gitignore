@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Models
+models/*.pth
+models/*.pt
+models/*.onnx
+
+# Data
+data/
+dataset/
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Output
+output/
+*.mp4
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Temp
+tmp/
+temp/
