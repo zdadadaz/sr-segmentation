@@ -359,6 +359,51 @@ def test_sr_integration():
     output = sft(features, seg_map)
     assert output.shape == (1, 64, 32, 32)
     print("✅ SFT block works")
+    
+    # Test SegAwareLoss
+    loss_fn = SegAwareLoss(use_perceptual=False, use_ssim=False)
+    sr = torch.randn(1, 3, 64, 64)
+    hr = torch.randn(1, 3, 64, 64)
+    seg = torch.zeros(1, 1, 64, 64)
+    seg[:, :, 10:30, 10:30] = 1
+    loss = loss_fn(sr, hr, seg)
+    assert loss.item() > 0
+    print("✅ SegAwareLoss works")
+
+
+def test_texture_classifier():
+    """Test texture classifier (PR7)"""
+    from src.texture_classifier import TextureClassifier
+    
+    classifier = TextureClassifier(threshold=0.3, min_area=50)
+    
+    # Test with random image
+    image = np.random.randint(0, 255, (240, 320, 3), dtype=np.uint8)
+    
+    # Test feature extraction
+    features = classifier.extract_features(image)
+    assert features.shape[:2] == (240, 320)
+    assert features.shape[2] == len(classifier.filters)
+    print("✅ Gabor feature extraction works")
+    
+    # Test classification
+    mask = classifier.classify_texture(image)
+    assert mask.shape == (240, 320)
+    assert mask.dtype == np.uint8
+    print("✅ Texture classification works")
+    
+    # Test with exclusion mask
+    exclude = np.zeros((240, 320), dtype=np.uint8)
+    exclude[50:150, 50:150] = 1
+    mask_excluded = classifier.classify_texture(image, exclude_mask=exclude)
+    assert mask_excluded[100, 100] == 0  # Excluded region
+    print("✅ Texture classification with exclusion works")
+    
+    # Test fur score map
+    score_map = classifier.get_fur_score_map(image)
+    assert score_map.shape == (240, 320)
+    assert 0 <= score_map.min() <= score_map.max() <= 1.0
+    print("✅ Fur score map works")
 
 
 if __name__ == '__main__':
@@ -378,6 +423,7 @@ if __name__ == '__main__':
         ("Pipeline E2E (PR4)", test_pipeline_e2e),
         ("Dataset Generator (PR5)", test_dataset_generator),
         ("SR Integration (PR6)", test_sr_integration),
+        ("Texture Classifier (PR7)", test_texture_classifier),
     ]
     
     passed = 0
