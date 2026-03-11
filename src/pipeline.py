@@ -3,10 +3,12 @@ SR Segmentation Pipeline
 Main entry point for the hair/fur segmentation system
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
 import numpy as np
 from pathlib import Path
+import time
+import torch
 
 
 @dataclass
@@ -25,106 +27,74 @@ class BBox:
     
     @property
     def xywh(self) -> Tuple[float, float, float, float]:
-        x = self.x1
-        y = self.y1
-        w = self.x2 - self.x1
-        h = self.y2 - self.y1
-        return (x, y, w, h)
+        return (self.x1, self.y1, self.x2 - self.x1, self.y2 - self.y1)
     
     @property
     def center(self) -> Tuple[float, float]:
-        cx = (self.x1 + self.x2) / 2
-        cy = (self.y1 + self.y2) / 2
-        return (cx, cy)
+        return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
 
 
 @dataclass
 class SegmentationResult:
-    """
-    Unified segmentation result data structure
-    """
-    # Original image shape
+    """Unified segmentation result data structure"""
     original_shape: Tuple[int, int]  # (H, W)
     
-    # Binary mask for hair/fur regions (0 = non-hair, 1 = hair/fur)
+    # Binary mask for hair/fur regions
     hair_fur_mask: Optional[np.ndarray] = None
     
-    # Detailed masks (for debugging/analysis)
-    animal_mask: Optional[np.ndarray] = None      # Fur from animals
-    human_hair_mask: Optional[np.ndarray] = None   # Hair from humans
-    face_mask: Optional[np.ndarray] = None         # Face regions (to exclude)
-    skin_mask: Optional[np.ndarray] = None         # Skin regions (to exclude)
-    vegetation_mask: Optional[np.ndarray] = None  # Vegetation (to exclude)
+    # Detailed masks
+    animal_mask: Optional[np.ndarray] = None
+    human_hair_mask: Optional[np.ndarray] = None
+    face_mask: Optional[np.ndarray] = None
+    skin_mask: Optional[np.ndarray] = None
+    vegetation_mask: Optional[np.ndarray] = None
     
     # Bounding boxes
-    animal_bboxes: List[BBox] = None              # Detected animals
-    person_bboxes: List[BBox] = None               # Detected persons
+    animal_bboxes: List[BBox] = field(default_factory=list)
+    person_bboxes: List[BBox] = field(default_factory=list)
     
     # Metadata
-    model_versions: dict = None                   # Which models were used
+    model_versions: dict = field(default_factory=dict)
     processing_time_ms: float = 0.0
-    
-    # Confidence scores
     hair_confidence: float = 1.0
-    
-    def __post_init__(self):
-        if self.animal_bboxes is None:
-            self.animal_bboxes = []
-        if self.person_bboxes is None:
-            self.person_bboxes = []
-        if self.model_versions is None:
-            self.model_versions = {}
     
     @property
     def final_mask(self) -> np.ndarray:
         """
         Get the final merged mask for SR processing
-        hair_fur_mask = (animal_mask OR human_hair_mask) AND NOT (face_mask OR skin_mask)
+        hair_fur_mask = (animal_mask | hair_mask) & ~(face_mask | skin_mask)
         """
-        h, w = self.original_shape
-        
-        # Start with hair/fur mask if available
         if self.hair_fur_mask is not None:
             return self.hair_fur_mask
         
-        # Otherwise merge from detailed masks
+        h, w = self.original_shape
         mask = np.zeros((h, w), dtype=np.uint8)
         
-        # Add animal fur
         if self.animal_mask is not None:
             mask = np.logical_or(mask, self.animal_mask).astype(np.uint8)
-        
-        # Add human hair
         if self.human_hair_mask is not None:
             mask = np.logical_or(mask, self.human_hair_mask).astype(np.uint8)
         
-        # Exclude face and skin regions
-        exclude_mask = np.zeros((h, w), dtype=np.uint8)
+        exclude = np.zeros((h, w), dtype=np.uint8)
         if self.face_mask is not None:
-            exclude_mask = np.logical_or(exclude_mask, self.face_mask).astype(np.uint8)
+            exclude = np.logical_or(exclude, self.face_mask).astype(np.uint8)
         if self.skin_mask is not None:
-            exclude_mask = np.logical_or(exclude_mask, self.skin_mask).astype(np.uint8)
+            exclude = np.logical_or(exclude, self.skin_mask).astype(np.uint8)
         
-        mask = mask * (1 - exclude_mask)
+        mask = mask * (1 - exclude)
         return mask
     
     def get_soft_mask(self, sigma: float = 3.0) -> np.ndarray:
-        """
-        Get soft mask with Gaussian blur on edges for smooth SR blending
-        """
+        """Get soft mask with Gaussian blur for smooth SR blending"""
         from scipy.ndimage import gaussian_filter
-        
-        binary_mask = self.final_mask
-        soft_mask = gaussian_filter(binary_mask.astype(float), sigma=sigma)
-        return soft_mask
+        return gaussian_filter(self.final_mask.astype(float), sigma=sigma)
     
     def to_dict(self) -> dict:
-        """Convert to dictionary for serialization"""
         return {
             'original_shape': self.original_shape,
             'has_hair_fur_mask': self.hair_fur_mask is not None,
-            'animal_bboxes': [b.__dict__ for b in self.animal_bboxes],
-            'person_bboxes': [b.__dict__ for b in self.person_bboxes],
+            'num_animals': len(self.animal_bboxes),
+            'num_persons': len(self.person_bboxes),
             'model_versions': self.model_versions,
             'processing_time_ms': self.processing_time_ms,
             'hair_confidence': self.hair_confidence,
@@ -143,20 +113,75 @@ class SegmentationPipeline:
     """
     
     def __init__(self, config_path: str = "configs/default.yaml"):
-        import yaml
         from utils.config_parser import load_config
         
         self.config = load_config(config_path)
-        
-        # Model placeholders (will be loaded lazily)
-        self.speciesnet_model = None
-        self.sam_model = None
-        self.bisenet_model = None
-        self.person_detector = None
-        
-        # Device
         self.device = self.config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
         
+        # Lazy-loaded models
+        self._speciesnet = None
+        self._sam = None
+        self._bisenet = None
+        self._person_detector = None
+        self._mask_merger = None
+    
+    @property
+    def speciesnet(self):
+        """Lazy-load SpeciesNet detector"""
+        if self._speciesnet is None:
+            from src.speciesnet import create_speciesnet_detector
+            self._speciesnet = create_speciesnet_detector(
+                model_path=self.config.get('models', {}).get('speciesnet'),
+                config=self.config.get('speciesnet', {}),
+                device=self.device
+            )
+        return self._speciesnet
+    
+    @property
+    def sam(self):
+        """Lazy-load SAM"""
+        if self._sam is None:
+            from src.sam import create_sam_generator
+            self._sam = create_sam_generator(
+                model_type=self.config.get('sam', {}).get('model_type', 'vit_h'),
+                checkpoint_path=self.config.get('models', {}).get('sam'),
+                device=self.device,
+                config=self.config.get('sam', {})
+            )
+        return self._sam
+    
+    @property
+    def bisenet(self):
+        """Lazy-load BiSeNet"""
+        if self._bisenet is None:
+            from src.bisenet import create_bisenet_parser
+            self._bisenet = create_bisenet_parser(
+                model_path=self.config.get('models', {}).get('bisenet'),
+                device=self.device,
+                config=self.config.get('bisenet', {})
+            )
+        return self._bisenet
+    
+    @property
+    def person_detector(self):
+        """Lazy-load person detector"""
+        if self._person_detector is None:
+            from src.bisenet import create_person_detector
+            self._person_detector = create_person_detector(
+                model_path=self.config.get('models', {}).get('person_detector'),
+                device=self.device,
+                config=self.config.get('person_detector', {})
+            )
+        return self._person_detector
+    
+    @property
+    def mask_merger(self):
+        """Lazy-load mask merger"""
+        if self._mask_merger is None:
+            from src.mask_merger import create_mask_merger
+            self._mask_merger = create_mask_merger(config=self.config)
+        return self._mask_merger
+    
     def segment(self, image: np.ndarray) -> SegmentationResult:
         """
         Run full segmentation pipeline
@@ -167,46 +192,114 @@ class SegmentationPipeline:
         Returns:
             SegmentationResult with masks and metadata
         """
-        import time
-        from utils.image_utils import preprocess_image
-        
         start_time = time.time()
         
-        # Convert to numpy if needed
+        # Convert PIL to numpy
         if hasattr(image, 'convert'):
             image = np.array(image.convert('RGB'))
         
         h, w = image.shape[:2]
+        result = SegmentationResult(original_shape=(h, w))
         
-        # Initialize result
-        result = SegmentationResult(
-            original_shape=(h, w),
-            model_versions={},
+        # Step 1: Detect animals (PR2)
+        animal_detections = self.speciesnet.detect_animals(image, filter_furry=True)
+        result.animal_bboxes = [
+            BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3], label=cls, confidence=conf)
+            for b, cls, conf in animal_detections
+        ]
+        
+        # Step 2: Generate animal masks with SAM (PR2)
+        if animal_detections:
+            animal_masks = self.sam.generate_masks_from_bboxes(image, animal_detections)
+            result.animal_mask = self.sam.combine_masks(animal_masks, (h, w))
+        
+        # Step 3: Detect persons and parse faces (PR3)
+        person_detections = self.person_detector.detect(image)
+        result.person_bboxes = [
+            BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3], label='person', confidence=conf)
+            for b, conf in person_detections
+        ]
+        
+        # Parse hair/face/skin for each detected person
+        combined_hair = np.zeros((h, w), dtype=np.uint8)
+        combined_face = np.zeros((h, w), dtype=np.uint8)
+        combined_skin = np.zeros((h, w), dtype=np.uint8)
+        
+        for bbox, conf in person_detections:
+            face_result = self.bisenet.parse(image, crop_box=bbox)
+            combined_hair = np.logical_or(combined_hair, face_result['hair']).astype(np.uint8)
+            combined_face = np.logical_or(combined_face, face_result['face']).astype(np.uint8)
+            combined_skin = np.logical_or(combined_skin, face_result['skin']).astype(np.uint8)
+        
+        result.human_hair_mask = combined_hair
+        result.face_mask = combined_face
+        result.skin_mask = combined_skin
+        
+        # Step 4: Merge masks (PR4)
+        merged = self.mask_merger.merge(
+            animal_mask=result.animal_mask,
+            human_hair_mask=result.human_hair_mask,
+            face_mask=result.face_mask,
+            skin_mask=result.skin_mask,
+            original_size=(h, w)
         )
-        
-        # TODO: Implement PR2 (SpeciesNet + SAM)
-        # TODO: Implement PR3 (BiSeNet face parsing)
-        # TODO: Implement PR4 (Mask merging)
+        result.hair_fur_mask = merged['final_mask']
         
         result.processing_time_ms = (time.time() - start_time) * 1000
+        result.model_versions = {
+            'speciesnet': 'yolov8n',
+            'sam': self.sam.model_type if self.sam.sam else 'fallback_grabcut',
+            'bisenet': 'bisenet_face_parsing' if self.bisenet.model else 'fallback_color',
+        }
         
         return result
     
     def segment_animals_only(self, image: np.ndarray) -> SegmentationResult:
         """Run only animal detection and masking (PR2)"""
-        # TODO: Implement in PR2
-        pass
+        if hasattr(image, 'convert'):
+            image = np.array(image.convert('RGB'))
+        
+        h, w = image.shape[:2]
+        result = SegmentationResult(original_shape=(h, w))
+        
+        detections = self.speciesnet.detect_animals(image, filter_furry=True)
+        result.animal_bboxes = [
+            BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3], label=cls, confidence=conf)
+            for b, cls, conf in detections
+        ]
+        
+        if detections:
+            masks = self.sam.generate_masks_from_bboxes(image, detections)
+            result.animal_mask = self.sam.combine_masks(masks, (h, w))
+        
+        return result
     
     def segment_humans_only(self, image: np.ndarray) -> SegmentationResult:
         """Run only human hair segmentation (PR3)"""
-        # TODO: Implement in PR3
-        pass
-    
-    def merge_masks(self, result: SegmentationResult) -> SegmentationResult:
-        """Merge animal and human masks (PR4)"""
-        # TODO: Implement in PR4
-        pass
-
-
-# Import torch at module level for device checking
-import torch
+        if hasattr(image, 'convert'):
+            image = np.array(image.convert('RGB'))
+        
+        h, w = image.shape[:2]
+        result = SegmentationResult(original_shape=(h, w))
+        
+        persons = self.person_detector.detect(image)
+        result.person_bboxes = [
+            BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3], label='person', confidence=conf)
+            for b, conf in persons
+        ]
+        
+        combined_hair = np.zeros((h, w), dtype=np.uint8)
+        combined_face = np.zeros((h, w), dtype=np.uint8)
+        combined_skin = np.zeros((h, w), dtype=np.uint8)
+        
+        for bbox, conf in persons:
+            masks = self.bisenet.parse(image, crop_box=bbox)
+            combined_hair = np.logical_or(combined_hair, masks['hair']).astype(np.uint8)
+            combined_face = np.logical_or(combined_face, masks['face']).astype(np.uint8)
+            combined_skin = np.logical_or(combined_skin, masks['skin']).astype(np.uint8)
+        
+        result.human_hair_mask = combined_hair
+        result.face_mask = combined_face
+        result.skin_mask = combined_skin
+        
+        return result
