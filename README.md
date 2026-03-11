@@ -55,9 +55,9 @@ visualize_masks(image, result)
 ## PR Progress
 
 - [x] PR1: Project scaffold + inference pipeline skeleton
-- [ ] PR2: SpeciesNet + SAM pixel mask
-- [ ] PR3: BiSeNet face parsing
-- [ ] PR4: Mask merging logic
-- [ ] PR5: Dataset auto-labeling pipeline
-- [ ] PR6: SR model SFT integration
-- [ ] PR7: Texture classifier fallback (optional)
+- [x] PR2: SpeciesNet + SAM pixel mask
+- [x] PR3: BiSeNet face parsing
+- [x] PR4: Mask merging logic + full pipeline
+- [x] PR5: Dataset auto-labeling pipeline
+- [x] PR6: SR model SFT integration (code pipeline, no training)
+- [x] PR7: Texture classifier fallback
