@@ -48,6 +48,7 @@ class SegmentationResult:
     face_mask: Optional[np.ndarray] = None
     skin_mask: Optional[np.ndarray] = None
     vegetation_mask: Optional[np.ndarray] = None
+    texture_mask: Optional[np.ndarray] = None
     
     # Bounding boxes
     animal_bboxes: List[BBox] = field(default_factory=list)
@@ -74,6 +75,8 @@ class SegmentationResult:
             mask = np.logical_or(mask, self.animal_mask).astype(np.uint8)
         if self.human_hair_mask is not None:
             mask = np.logical_or(mask, self.human_hair_mask).astype(np.uint8)
+        if self.texture_mask is not None:
+            mask = np.logical_or(mask, self.texture_mask).astype(np.uint8)
         
         exclude = np.zeros((h, w), dtype=np.uint8)
         if self.face_mask is not None:
@@ -124,6 +127,7 @@ class SegmentationPipeline:
         self._bisenet = None
         self._person_detector = None
         self._mask_merger = None
+        self._texture_classifier = None
     
     @property
     def speciesnet(self):
@@ -181,6 +185,16 @@ class SegmentationPipeline:
             from src.mask_merger import create_mask_merger
             self._mask_merger = create_mask_merger(config=self.config)
         return self._mask_merger
+    
+    @property
+    def texture_classifier(self):
+        """Lazy-load texture classifier (PR7)"""
+        if self._texture_classifier is None:
+            from src.texture_classifier import create_texture_classifier
+            self._texture_classifier = create_texture_classifier(
+                config=self.config.get('texture_classifier', {})
+            )
+        return self._texture_classifier
     
     def segment(self, image: np.ndarray) -> SegmentationResult:
         """
@@ -243,13 +257,32 @@ class SegmentationPipeline:
             skin_mask=result.skin_mask,
             original_size=(h, w)
         )
-        result.hair_fur_mask = merged['final_mask']
+        
+        # Step 5: Texture fallback (PR7) on remaining areas
+        exclude_mask = merged['exclude_mask']
+        # Also exclude regions already designated as animal or human hair
+        exclude_mask = np.logical_or(exclude_mask, merged['combined_hair']).astype(np.uint8)
+        
+        texture_mask = self.texture_classifier.classify_texture(image, exclude_mask=exclude_mask)
+        result.texture_mask = texture_mask
+        
+        # Merge again with texture
+        merged_with_texture = self.mask_merger.merge(
+            animal_mask=result.animal_mask,
+            human_hair_mask=result.human_hair_mask,
+            face_mask=result.face_mask,
+            skin_mask=result.skin_mask,
+            texture_mask=result.texture_mask,
+            original_size=(h, w)
+        )
+        result.hair_fur_mask = merged_with_texture['final_mask']
         
         result.processing_time_ms = (time.time() - start_time) * 1000
         result.model_versions = {
             'speciesnet': 'yolov8n',
             'sam': self.sam.model_type if self.sam.sam else 'fallback_grabcut',
             'bisenet': 'bisenet_face_parsing' if self.bisenet.model else 'fallback_color',
+            'texture': 'gabor_filter_bank',
         }
         
         return result

@@ -13,7 +13,7 @@ ENV/
 models/*.pth
 models/*.pt
 models/*.onnx
-
+experiments/*.pth
 # Data
 data/
 dataset/

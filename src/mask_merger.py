@@ -41,6 +41,7 @@ class MaskMerger:
         human_hair_mask: np.ndarray = None,
         face_mask: np.ndarray = None,
         skin_mask: np.ndarray = None,
+        texture_mask: np.ndarray = None,
         original_size: Tuple[int, int] = None
     ) -> Dict[str, np.ndarray]:
         """
@@ -51,6 +52,7 @@ class MaskMerger:
             human_hair_mask: Binary mask from human hair
             face_mask: Face regions to exclude
             skin_mask: Skin regions to exclude
+            texture_mask: Binary mask from texture classifier
             original_size: (H, W) of original image
             
         Returns:
@@ -63,12 +65,14 @@ class MaskMerger:
         human_hair = self._ensure_size(human_hair_mask, (h, w))
         face = self._ensure_size(face_mask, (h, w))
         skin = self._ensure_size(skin_mask, (h, w))
+        texture = self._ensure_size(texture_mask, (h, w))
         
         # Compute exclusion mask
         exclude_mask = np.logical_or(face, skin).astype(np.uint8)
         
         # Compute combined hair/fur mask
         combined_hair = np.logical_or(animal, human_hair).astype(np.uint8)
+        combined_hair = np.logical_or(combined_hair, texture).astype(np.uint8)
         
         # Apply exclusion
         final_mask = combined_hair * (1 - exclude_mask)
@@ -81,6 +85,7 @@ class MaskMerger:
             'human_hair_mask': human_hair,
             'face_mask': face,
             'skin_mask': skin,
+            'texture_mask': texture,
             'exclude_mask': exclude_mask,
             'combined_hair': combined_hair,
             'final_mask': final_mask,
@@ -104,6 +109,7 @@ class MaskMerger:
             human_hair_mask=segmentation_result.human_hair_mask,
             face_mask=segmentation_result.face_mask,
             skin_mask=segmentation_result.skin_mask,
+            texture_mask=getattr(segmentation_result, 'texture_mask', None),
             original_size=segmentation_result.original_shape
         )
         

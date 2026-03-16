@@ -57,6 +57,11 @@ person_detector:
   model: yolov8n
   confidence_threshold: 0.5
 
+# Texture classification (PR7)
+texture_classifier:
+  threshold: 0.5
+  min_area: 200
+
 # Mask merging
 merging:
   gaussian_sigma: 3.0

@@ -85,7 +85,7 @@ class SpeciesNetDetector:
                 self.model = YOLO(self.model_path)
             else:
                 # Use pretrained yolov8n (nano) model
-                self.model = YOLO('yolov8n.pt')
+                self.model = YOLO('models/yolov8n.pt')
             
             # Move to device
             if self.device == 'cuda' and torch.cuda.is_available():

@@ -303,8 +303,11 @@ def test_pipeline_e2e():
     assert result.original_shape == (480, 640)
     assert result.hair_fur_mask is not None
     assert result.hair_fur_mask.shape == (480, 640)
+    assert result.texture_mask is not None
+    assert result.texture_mask.shape == (480, 640)
     assert result.processing_time_ms > 0
     assert isinstance(result.model_versions, dict)
+    assert 'texture' in result.model_versions
     print("✅ Full pipeline works end-to-end")
     
     # Test animals-only

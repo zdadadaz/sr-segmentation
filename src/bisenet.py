@@ -58,7 +58,7 @@ class BiSeNetParser:
             # Try loading from provided path
             if self.model_path and Path(self.model_path).exists():
                 self.model = self._build_bisenet()
-                state_dict = torch.load(self.model_path, map_location='cpu')
+                state_dict = torch.load(self.model_path, map_location='cpu', weights_only=False)
                 self.model.load_state_dict(state_dict)
                 device = self.device if self.device == 'cuda' and torch.cuda.is_available() else 'cpu'
                 self.model.to(device)
@@ -73,12 +73,15 @@ class BiSeNetParser:
     def _build_bisenet(self) -> nn.Module:
         """
         Build BiSeNet model architecture
-        Simplified version - in production use the full BiSeNet implementation
         """
-        # Placeholder - will use actual BiSeNet architecture
-        # For now, return a simple segmentation model
-        model = SimpleFaceParser(self.num_classes)
-        return model
+        try:
+            from src.model import BiSeNet
+            model = BiSeNet(self.num_classes, 'resnet18')
+            return model
+        except ImportError:
+            print("Warning: Could not import BiSeNet from src.model. Make sure model.py and resnet.py are present.")
+            # Fallback will be triggered dynamically
+            return None
     
     def parse(
         self,
@@ -251,51 +254,7 @@ class BiSeNetParser:
         return result['hair']
 
 
-class SimpleFaceParser(nn.Module):
-    """
-    Simplified face parsing model
-    Placeholder for actual BiSeNet architecture
-    """
-    
-    def __init__(self, num_classes: int = 19):
-        super().__init__()
-        
-        # Simple encoder-decoder
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-        )
-        
-        self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(256, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(128, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-        )
-        
-        self.head = nn.Conv2d(64, num_classes, 1)
-    
-    def forward(self, x):
-        feat = self.encoder(x)
-        feat = self.decoder(feat)
-        out = self.head(feat)
-        return out
+
 
 
 class PersonDetector:
@@ -325,7 +284,7 @@ class PersonDetector:
             if model_path and Path(model_path).exists():
                 self.model = YOLO(model_path)
             else:
-                self.model = YOLO('yolov8n.pt')
+                self.model = YOLO('models/yolov8n.pt')
             
         except ImportError:
             print("Warning: ultralytics not installed. Using OpenCV cascade for person detection.")
@@ -436,3 +395,119 @@ def create_person_detector(
         device=device,
         config=config
     )
+    def parse(
+        self, 
+        image: np.ndarray, 
+        person_boxes: List['BBox'] = None
+    ) -> Dict[str, np.ndarray]:
+        """
+        Parse face features from image.
+        
+        Args:
+            image: RGB image structure (H,W,3)
+            person_boxes: List of bounding boxes for people. If none provided,
+                         will attempt detection if detector configured.
+                         
+        Returns:
+            Dictionary mapping feature names ('hair', 'face', 'skin') to boolean masks
+        """
+        if self.model is None:
+            # Fallback to color-based skin/hair heuristics if no model available
+            return self._fallback_parse(image, person_boxes)
+            
+        # Determine ROI if person boxes provided
+        # In a generic situation, we would process each person box.
+        # For simplicity, we process the whole image or the largest box crop.
+        # This implementation processes the whole resized image.
+        
+        img_tensor = self._preprocess(image)
+        img_tensor = img_tensor.to(self.device)
+        
+        with torch.no_grad():
+            try:
+                # Actual face parsing network typically outputs a list of scales;
+                # often index 0 is the primary output shape [1, num_classes, H, W]
+                out = self.model(img_tensor)
+                
+                # Check output format and extract primary output
+                if isinstance(out, tuple) or isinstance(out, list):
+                    out = out[0]
+                    
+                # Get predicted class indices
+                parsing = out.squeeze(0).cpu().numpy().argmax(0)
+                
+            except Exception as e:
+                print(f"Error during BiSeNet inference: {e}")
+                return self._fallback_parse(image, person_boxes)
+                
+        # Resize mask back to original image size
+        parsing_full = cv2.resize(
+            parsing.astype(np.uint8), 
+            (image.shape[1], image.shape[0]), 
+            interpolation=cv2.INTER_NEAREST
+        )
+        
+        # Extract specific masks based on standard FaceParsing ID mapping
+        # 1: skin, 2: l_brow, 3: r_brow, 4: l_eye, 5: r_eye, 6: eye_g, 7: l_ear, 8: r_ear, 
+        # 9: ear_r, 10: nose, 11: mouth, 12: u_lip, 13: l_lip, 14: neck, 15: neck_l, 16: cloth, 
+        # 17: hair, 18: hat
+        
+        skin_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        face_ids = [1, 2, 3, 4, 5, 6, 10, 11, 12, 13]
+        
+        # Merge parsing map into binary masks
+        skin_mask = np.isin(parsing_full, skin_ids).astype(np.uint8)
+        face_mask = np.isin(parsing_full, face_ids).astype(np.uint8)
+        hair_mask = (parsing_full == 17).astype(np.uint8)
+        
+        # Mask off areas where no person is detected to reduce false positives
+        if person_boxes:
+            person_mask = np.zeros_like(hair_mask)
+            for box in person_boxes:
+                person_mask[box.ymin:box.ymax, box.xmin:box.xmax] = 1
+            hair_mask = hair_mask * person_mask
+            skin_mask = skin_mask * person_mask
+            face_mask = face_mask * person_mask
+            
+        return {
+            'hair': hair_mask,
+            'face': face_mask,
+            'skin': skin_mask
+        }
+        
+    def _fallback_parse(
+        self, 
+        image: np.ndarray, 
+        person_boxes: List['BBox'] = None
+    ) -> Dict[str, np.ndarray]:
+        """
+        Very simple fallback method relying on color heuritsics and basic assumptions
+        used when actual BiSeNet is not available.
+        """
+        h, w = image.shape[:2]
+        
+        empty_mask = np.zeros((h, w), dtype=np.uint8)
+        result = {
+            'hair': empty_mask.copy(),
+            'face': empty_mask.copy(),
+            'skin': empty_mask.copy()
+        }
+        
+        if person_boxes:
+            for box in person_boxes:
+                h_box = box.ymax - box.ymin
+                head_ymin = box.ymin
+                head_ymax = box.ymin + int(h_box * 0.25)
+                face_ymin = box.ymin + int(h_box * 0.1)
+                face_ymax = box.ymin + int(h_box * 0.4)
+                
+                result['hair'][head_ymin:head_ymax, box.xmin:box.xmax] = 1
+                result['face'][face_ymin:face_ymax, box.xmin:box.xmax] = 1
+                result['skin'][face_ymin:face_ymax, box.xmin:box.xmax] = 1
+                
+        return result
+
+    def get_hair_mask(self, image: np.ndarray, person_boxes: List['BBox'] = None) -> np.ndarray:
+        """Utility method to get just the hair mask"""
+        result = self.parse(image, person_boxes)
+        return result['hair']

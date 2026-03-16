@@ -32,8 +32,10 @@ class DatasetGenerator:
         self,
         pipeline,
         output_dir: str = 'dataset',
-        images_subdir: str = 'images',
-        masks_subdir: str = 'masks'
+        images_subdir: str = 'hr',
+        lr_subdir: str = 'lr',
+        masks_subdir: str = 'mask',
+        scale: int = 4
     ):
         """
         Initialize dataset generator
@@ -41,16 +43,21 @@ class DatasetGenerator:
         Args:
             pipeline: SegmentationPipeline instance
             output_dir: Base output directory
-            images_subdir: Subdirectory for images
+            images_subdir: Subdirectory for HR images
+            lr_subdir: Subdirectory for LR images
             masks_subdir: Subdirectory for masks
+            scale: Downsampling scale for LR images
         """
         self.pipeline = pipeline
         self.output_dir = Path(output_dir)
         self.images_dir = self.output_dir / images_subdir
+        self.lr_dir = self.output_dir / lr_subdir
         self.masks_dir = self.output_dir / masks_subdir
+        self.scale = scale
         
         # Create directories
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.lr_dir.mkdir(parents=True, exist_ok=True)
         self.masks_dir.mkdir(parents=True, exist_ok=True)
         
         # Statistics
@@ -114,7 +121,7 @@ class DatasetGenerator:
         image_path: str
     ) -> Optional[str]:
         """
-        Process a single image
+        Process a single image to create HR, LR, and Mask
         
         Args:
             image_path: Path to input image
@@ -130,19 +137,33 @@ class DatasetGenerator:
             image = image.convert('RGB')
         image_np = np.array(image)
         
+        # Ensure image is divisible by scale (for clean downsampling)
+        h, w = image_np.shape[:2]
+        new_h = (h // self.scale) * self.scale
+        new_w = (w // self.scale) * self.scale
+        if new_h != h or new_w != w:
+            image_np = cv2.resize(image_np, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            h, w = new_h, new_w
+        
         # Run segmentation
         result = self.pipeline.segment(image_np)
         
         # Generate output filename
         output_name = image_path.stem + '.png'
         output_image_path = self.images_dir / output_name
+        output_lr_path = self.lr_dir / output_name
         output_mask_path = self.masks_dir / output_name
         
-        # Save image
+        # Save HR image
         Image.fromarray(image_np).save(output_image_path)
         
+        # Create and save LR image
+        lr_h, lr_w = h // self.scale, w // self.scale
+        lr_img = cv2.resize(image_np, (lr_w, lr_h), interpolation=cv2.INTER_CUBIC)
+        Image.fromarray(lr_img).save(output_lr_path)
+        
         # Create and save mask
-        mask = self._create_output_mask(result, image_np.shape[:2])
+        mask = self._create_output_mask(result, (h, w))
         mask_img = Image.fromarray(mask)
         mask_img.save(output_mask_path)
         

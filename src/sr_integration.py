@@ -405,8 +405,10 @@ class SegAwareLoss(nn.Module):
             return self.vgg_layers(x)
         
         # Extract features
-        sr_feat = extract_features(sr * 255)
-        hr_feat = extract_features(hr * 255)
+        sr_clipped = torch.clamp(sr, 0, 1)
+        hr_clipped = torch.clamp(hr, 0, 1)
+        sr_feat = extract_features(sr_clipped * 255)
+        hr_feat = extract_features(hr_clipped * 255)
         
         # Compute loss with masking
         loss_hair = F.l1_loss(sr_feat * hair_mask[:, :, :sr_feat.size(2), :sr_feat.size(3)],
@@ -428,9 +430,12 @@ class SegAwareLoss(nn.Module):
         
         ssim = SSIM().to(sr.device)
         
+        sr_clipped = torch.clamp(sr, 0, 1)
+        hr_clipped = torch.clamp(hr, 0, 1)
+        
         # Compute SSIM with masking
-        hair_ssim = 1 - ssim(sr * hair_mask, hr * hair_mask)
-        other_ssim = 1 - ssim(sr * other_mask, hr * other_mask)
+        hair_ssim = 1 - ssim(sr_clipped * hair_mask, hr_clipped * hair_mask)
+        other_ssim = 1 - ssim(sr_clipped * other_mask, hr_clipped * other_mask)
         
         return 0.2 * (self.hair_weight * hair_ssim + self.other_weight * other_ssim)
 
