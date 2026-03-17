@@ -1,3 +1,4 @@
+
 # SR Segmentation Configuration
 
 device: cuda  # cuda or cpu
@@ -7,6 +8,7 @@ models:
   speciesnet: models/speciesNet
   sam: models/sam_vit_h.pth
   bisenet: models/face_parsing.pth
+  facexformer: models/facexfromer.pt  # note: typo in downloaded filename
   person_detector: models/yolov8n.pt
 
 # SAM settings
@@ -22,6 +24,9 @@ sam:
 speciesnet:
   confidence_threshold: 0.5
 
+# Face parser selection: 'bisenet' or 'facexformer'
+face_parser: facexformer
+
 # BiSeNet settings
 bisenet:
   num_classes: 19
@@ -30,7 +35,7 @@ bisenet:
 # Person detection
 person_detector:
   model: yolov8n
-  confidence_threshold: 0.5
+  confidence_threshold: 0.2
 
 # Texture classification (PR7)
 texture_classifier:

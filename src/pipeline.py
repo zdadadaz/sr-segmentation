@@ -156,14 +156,23 @@ class SegmentationPipeline:
     
     @property
     def bisenet(self):
-        """Lazy-load BiSeNet"""
+        """Lazy-load face parser (BiSeNet or FaceXFormer depending on config)"""
         if self._bisenet is None:
-            from src.bisenet import create_bisenet_parser
-            self._bisenet = create_bisenet_parser(
-                model_path=self.config.get('models', {}).get('bisenet'),
-                device=self.device,
-                config=self.config.get('bisenet', {})
-            )
+            parser_name = self.config.get('face_parser', 'bisenet')
+            if parser_name == 'facexformer':
+                from src.facexformer_parser import create_facexformer_parser
+                self._bisenet = create_facexformer_parser(
+                    model_path=self.config.get('models', {}).get('facexformer'),
+                    device=self.device,
+                    config={}
+                )
+            else:
+                from src.bisenet import create_bisenet_parser
+                self._bisenet = create_bisenet_parser(
+                    model_path=self.config.get('models', {}).get('bisenet'),
+                    device=self.device,
+                    config=self.config.get('bisenet', {})
+                )
         return self._bisenet
     
     @property
@@ -196,6 +205,25 @@ class SegmentationPipeline:
             )
         return self._texture_classifier
     
+    @staticmethod
+    def _bboxes_heavily_overlap(bboxes: list, iou_threshold: float = 0.5) -> bool:
+        """Return True if any pair of bboxes has IoU > iou_threshold."""
+        if len(bboxes) < 2:
+            return False
+        for i in range(len(bboxes)):
+            x1i, y1i, x2i, y2i = bboxes[i]
+            ai = max(0, x2i - x1i) * max(0, y2i - y1i)
+            for j in range(i + 1, len(bboxes)):
+                x1j, y1j, x2j, y2j = bboxes[j]
+                aj = max(0, x2j - x1j) * max(0, y2j - y1j)
+                ix = max(0, min(x2i, x2j) - max(x1i, x1j))
+                iy = max(0, min(y2i, y2j) - max(y1i, y1j))
+                inter = ix * iy
+                union = ai + aj - inter
+                if union > 0 and inter / union > iou_threshold:
+                    return True
+        return False
+
     def segment(self, image: np.ndarray) -> SegmentationResult:
         """
         Run full segmentation pipeline
@@ -234,16 +262,27 @@ class SegmentationPipeline:
             for b, conf in person_detections
         ]
         
-        # Parse hair/face/skin for each detected person
+        # Parse hair/face/skin for each detected person.
+        # When multiple person bboxes heavily overlap (IoU > 0.5) the per-crop
+        # approach degrades — run BiSeNet on the full image instead so all
+        # people are parsed in one pass.
         combined_hair = np.zeros((h, w), dtype=np.uint8)
         combined_face = np.zeros((h, w), dtype=np.uint8)
         combined_skin = np.zeros((h, w), dtype=np.uint8)
-        
-        for bbox, conf in person_detections:
-            face_result = self.bisenet.parse(image, crop_box=bbox)
-            combined_hair = np.logical_or(combined_hair, face_result['hair']).astype(np.uint8)
-            combined_face = np.logical_or(combined_face, face_result['face']).astype(np.uint8)
-            combined_skin = np.logical_or(combined_skin, face_result['skin']).astype(np.uint8)
+
+        if person_detections and self._bboxes_heavily_overlap(
+            [b for b, _ in person_detections]
+        ):
+            face_result = self.bisenet.parse(image, crop_box=None)
+            combined_hair = face_result['hair']
+            combined_face = face_result['face']
+            combined_skin = face_result['skin']
+        else:
+            for bbox, conf in person_detections:
+                face_result = self.bisenet.parse(image, crop_box=bbox)
+                combined_hair = np.logical_or(combined_hair, face_result['hair']).astype(np.uint8)
+                combined_face = np.logical_or(combined_face, face_result['face']).astype(np.uint8)
+                combined_skin = np.logical_or(combined_skin, face_result['skin']).astype(np.uint8)
         
         result.human_hair_mask = combined_hair
         result.face_mask = combined_face
@@ -278,10 +317,11 @@ class SegmentationPipeline:
         result.hair_fur_mask = merged_with_texture['final_mask']
         
         result.processing_time_ms = (time.time() - start_time) * 1000
+        parser_name = self.config.get('face_parser', 'bisenet')
         result.model_versions = {
-            'speciesnet': 'yolov8n',
+            'speciesnet': 'speciesnet_md_v5a',
             'sam': self.sam.model_type if self.sam.sam else 'fallback_grabcut',
-            'bisenet': 'bisenet_face_parsing' if self.bisenet.model else 'fallback_color',
+            'face_parser': parser_name,
             'texture': 'gabor_filter_bank',
         }
         
