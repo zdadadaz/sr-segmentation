@@ -1,27 +1,33 @@
-# Core dependencies
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24.0
-Pillow>=9.5.0
-opencv-python>=4.8.0
-pyyaml>=6.0
-
-# Model dependencies
-transformers>=4.30.0
-timm>=0.9.0
-segment-anything>=1.0
-onnxruntime>=1.15.0
-
-# Utils
+# Core
+torch>=2.2.2
+torchvision>=0.17.2
+numpy>=1.26.4
+Pillow>=10.2.0
+opencv-python>=4.11.0
+PyYAML>=6.0
 scipy>=1.10.0
-matplotlib>=3.7.0
 tqdm>=4.65.0
+matplotlib>=3.7.0
 einops>=0.6.0
 
-# Optional for training
+# Animal detection
+speciesnet>=5.0.3          # Google SpeciesNet (MegaDetector v5); requires Python <3.13
+setuptools<70              # pkg_resources shim required by speciesnet's yolov5 dependency
+
+# Segmentation
+segment-anything>=1.0      # SAM (Segment Anything Model)
+ultralytics>=8.4.0         # YOLOv8 person detector
+
+# Face parsing
+# BiSeNet (default): weights downloaded separately, no pip package
+facenet-pytorch>=2.6.0     # MTCNN face detection used by FaceXFormer parser
+# FaceXFormer network code lives in tmp/facexformer-main/ (cloned from GitHub)
+
+# SR training
+piqa>=1.3.1                # SSIM / perceptual metrics for SegAwareLoss
+timm>=0.9.0                # backbone pretrained weights (used by FaceXFormer)
+transformers>=4.30.0
+
+# Optional
 # tensorboard>=2.12.0
 # wandb>=0.14.0
-
-# For dataset
-# albumentations>=1.3.0
-piqa>=1.3.1
