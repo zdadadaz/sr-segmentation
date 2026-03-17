@@ -63,6 +63,23 @@ pip install -r requirements.txt
 
 ---
 
+## 📥 Model Weights
+
+Before running the pipeline, you need to download the pre-trained weights and place them in the `models/` directory.
+
+| Model | Weight File | Purpose | Download Link |
+|-------|------------|---------|---------------|
+| YOLOv8n | `yolov8n.pt` | Detection | [Download](https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt) |
+| SAM (ViT-H) | `sam_vit_h.pth` | Segmentation | [Download](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth) |
+| BiSeNet | `face_parsing.pth` | Face Parsing | [Download (GDrive)](https://docs.google.com/uc?export=download&id=154JgKpzCPW82qINcVieuPH3fZ2e0P812) |
+
+Alternatively, you can use the provided script to download the BiSeNet weights:
+```bash
+python download_gdrive.py
+```
+
+---
+
 ## 🔄 Workflow
 
 ### 1. Dataset Generation
