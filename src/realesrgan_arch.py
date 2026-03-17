@@ -58,6 +58,43 @@ class RRDB(nn.Module):
         out = self.rdb3(out)
         return out * 0.2 + x
 
+class RRDBNet(nn.Module):
+    """Standard RRDBNet without SFT.
+
+    Used for the mask-concat training mode where the segmentation mask is
+    concatenated to the LR input channels before the network (no SFT needed).
+    """
+
+    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4):
+        super(RRDBNet, self).__init__()
+        self.scale = scale
+
+        self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
+        self.body = make_layer(RRDB, num_block, num_feat=num_feat, num_grow_ch=num_grow_ch)
+        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+
+        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        if self.scale == 8:
+            self.conv_up3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+
+        self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        feat = self.conv_first(x)
+        body_feat = self.conv_body(self.body(feat))
+        feat = feat + body_feat
+
+        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        if self.scale == 8:
+            feat = self.lrelu(self.conv_up3(F.interpolate(feat, scale_factor=2, mode='nearest')))
+
+        return self.conv_last(self.lrelu(self.conv_hr(feat)))
+
+
 class SegGuidedRRDBNet(nn.Module):
     """Networks consisting of Residual in Residual Dense Block, which is used
     in ESRGAN and Real-ESRGAN, integrated with segmentation guidance (SFT).
