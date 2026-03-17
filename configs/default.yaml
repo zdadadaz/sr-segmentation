@@ -35,7 +35,7 @@ bisenet:
 # Person detection
 person_detector:
   model: yolov8n
-  confidence_threshold: 0.2
+  confidence_threshold: 0.5
 
 # Texture classification (PR7)
 texture_classifier:

@@ -9,11 +9,18 @@ env/
 ENV/
 .venv
 
-# Models
-models/*.pth
-models/*.pt
-models/*.onnx
-experiments/*.pth
+# Models (all subdirectories)
+models/**/*.pth
+models/**/*.pt
+models/**/*.onnx
+models/**/*.tar
+models/**/*.txt
+models/**/*.json
+models/**/README*
+!models/speciesNet/info.json   # keep metadata file
+
+# Experiments / checkpoints
+experiments/
 # Data
 data/
 dataset/
