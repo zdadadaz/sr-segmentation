@@ -95,20 +95,22 @@ def get_default_config() -> Dict[str, Any]:
 
 def resolve_paths(config: Dict[str, Any], base_dir: Path) -> Dict[str, Any]:
     """
-    Resolve relative paths in config to absolute paths
-    
+    Resolve relative paths in config to absolute paths.
+    Paths are resolved relative to the current working directory (project root),
+    not relative to the config file's directory.
+
     Args:
         config: Configuration dictionary
-        base_dir: Base directory for relative paths
-        
+        base_dir: Base directory of the config file (unused, kept for API compat)
+
     Returns:
         Config with resolved paths
     """
     if 'models' in config:
         for key, path in config['models'].items():
             if isinstance(path, str) and not Path(path).is_absolute():
-                config['models'][key] = str(base_dir / path)
-    
+                config['models'][key] = str(Path(path).resolve())
+
     return config
 
 

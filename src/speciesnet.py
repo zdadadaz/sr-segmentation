@@ -19,33 +19,19 @@ class SpeciesNetDetector:
     Uses YOLOv8 as the underlying detector with class filtering
     """
     
-    # COCO class indices for animals
-    # 15: cat, 16: dog, 17: horse, 18: cow, 19: sheep, 20: bird
-    # 21: rabbit, 22: hamster (not in COCO), 23: squirrel (not in COCO)
-    
+    # COCO class indices for animals (0-indexed, standard COCO 80-class)
     COCO_ANIMAL_CLASSES = {
+        14: 'bird',
         15: 'cat',
-        16: 'dog', 
+        16: 'dog',
         17: 'horse',
-        18: 'cow',
-        19: 'sheep',
-        20: 'bird',
-        21: 'rabbit',
-        # Extended classes that may be present in models
-        22: 'hamster',
-        23: 'squirrel',
+        18: 'sheep',
+        19: 'cow',
+        20: 'elephant',
+        21: 'bear',
+        22: 'zebra',
+        23: 'giraffe',
     }
-    
-    # Furry animals - exclude birds
-    FURRY_CLASSES = {
-        'cat', 'dog', 'horse', 'cow', 'sheep', 'rabbit',
-        'bear', 'fox', 'wolf', 'deer', 'squirrel', 'mouse',
-        'rat', 'hamster', 'gerbil', 'ferret', 'weasel', 'otter',
-        'badger', 'hedgehog', 'llama', 'alpaca', 'goat', 'pig'
-    }
-    
-    # Bird classes to exclude
-    BIRD_CLASSES = {'bird', 'bird'}
     
     def __init__(
         self,
@@ -66,7 +52,7 @@ class SpeciesNetDetector:
         
         # Get furry classes from config or use default
         self.furry_classes = set(
-            self.config.get('furry_classes', self.FURRY_CLASSES)
+            self.config.get('furry_classes', list(self.COCO_ANIMAL_CLASSES.values()))
         )
         self.confidence_threshold = self.config.get('confidence_threshold', 0.5)
         
@@ -78,22 +64,13 @@ class SpeciesNetDetector:
     
     def _load_model(self):
         """Load the YOLOv8 model"""
-        try:
-            from ultralytics import YOLO
-            
-            if self.model_path and Path(self.model_path).exists():
-                self.model = YOLO(self.model_path)
-            else:
-                # Use pretrained yolov8n (nano) model
-                self.model = YOLO('models/yolov8n.pt')
-            
-            # Move to device
-            if self.device == 'cuda' and torch.cuda.is_available():
-                self.model.to('cuda')
-                
-        except ImportError:
-            print("Warning: ultralytics not installed. Using fallback detection.")
-            self.model = None
+        from ultralytics import YOLO
+        if self.model_path and Path(self.model_path).exists():
+            self.model = YOLO(self.model_path)
+        else:
+            self.model = YOLO('models/yolov8n.pt')
+        if self.device == 'cuda' and torch.cuda.is_available():
+            self.model.to('cuda')
     
     def detect_animals(
         self,
@@ -111,9 +88,6 @@ class SpeciesNetDetector:
             List of (bbox, class_name, confidence) tuples
             bbox is [x1, y1, x2, y2]
         """
-        if self.model is None:
-            return self._fallback_detect(image)
-        
         # Run inference
         results = self.model(image, verbose=False, conf=self.confidence_threshold)
         
@@ -140,46 +114,6 @@ class SpeciesNetDetector:
                     continue
                 
                 detections.append(([float(x1), float(y1), float(x2), float(y2)], class_name, confidence))
-        
-        return detections
-    
-    def _fallback_detect(
-        self,
-        image: np.ndarray
-    ) -> List[Tuple[List[float], str, float]]:
-        """
-        Fallback detection using basic image processing
-        Used when model is not available
-        """
-        # Simple edge-based detection as placeholder
-        # This is just for testing the pipeline
-        
-        h, w = image.shape[:2]
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        
-        # Simple skin/fur color detection in HSV
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-        
-        # Detect brownish/orange regions (common fur colors)
-        lower_brown = np.array([10, 50, 50])
-        upper_brown = np.array([30, 255, 255])
-        mask = cv2.inRange(hsv, lower_brown, upper_brown)
-        
-        # Find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        detections = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 5000:  # Minimum area threshold
-                x, y, cw, ch = cv2.boundingRect(contour)
-                detections.append((
-                    [float(x), float(y), float(x + cw), float(y + ch)],
-                    'animal',
-                    0.5
-                ))
         
         return detections
     

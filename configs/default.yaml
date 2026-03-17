@@ -22,30 +22,15 @@ sam:
 speciesnet:
   confidence_threshold: 0.5
   furry_classes:
+    # COCO classes detectable by YOLOv8
     - cat
     - dog
     - horse
     - cow
     - sheep
-    - rabbit
     - bear
-    - fox
-    - wolf
-    - deer
-    - squirrel
-    - mouse
-    - rat
-    - hamster
-    - gerbil
-    - ferret
-    - weasel
-    - otter
-    - badger
-    - hedgehog
-    - llama
-    - alpaca
-    - goat
-    - pig
+    - zebra
+    - giraffe
 
 # BiSeNet settings
 bisenet:
