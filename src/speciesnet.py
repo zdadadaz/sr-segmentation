@@ -1,189 +1,104 @@
 """
-SpeciesNet animal detection module (PR2)
+SpeciesNet animal detection module
 
-Uses YOLOv8 with animal class filtering as SpeciesNet alternative
+Uses Google SpeciesNet (MegaDetector v5 + EfficientNet V2 classifier)
+for detecting animals in images.
 """
 
+import tempfile
 import numpy as np
-from typing import List, Tuple, Optional, Dict
-import torch
+from typing import List, Tuple
 from pathlib import Path
-import cv2
+from PIL import Image
 
 
 class SpeciesNetDetector:
     """
-    SpeciesNet for detecting animals in images
-    
-    Filters for furry animals only (excludes birds, reptiles, fish, insects)
-    Uses YOLOv8 as the underlying detector with class filtering
+    Animal detector backed by Google SpeciesNet (MegaDetector v5).
+
+    SpeciesNet detect() output per image:
+        detections: list of {
+            'category': '1' (animal) | '2' (human) | '3' (vehicle),
+            'label':    'animal' | 'human' | 'vehicle',
+            'conf':     float,
+            'bbox':     [xmin, ymin, width, height]  — normalized [0, 1]
+        }
     """
-    
-    # COCO class indices for animals (0-indexed, standard COCO 80-class)
-    COCO_ANIMAL_CLASSES = {
-        14: 'bird',
-        15: 'cat',
-        16: 'dog',
-        17: 'horse',
-        18: 'sheep',
-        19: 'cow',
-        20: 'elephant',
-        21: 'bear',
-        22: 'zebra',
-        23: 'giraffe',
-    }
-    
+
     def __init__(
         self,
         model_path: str = None,
         config: dict = None,
-        device: str = 'cuda'
+        device: str = 'cpu',
     ):
-        """
-        Initialize SpeciesNet detector
-        
-        Args:
-            model_path: Path to model weights (YOLOv8)
-            config: Configuration dictionary
-            device: Device to run on
-        """
-        self.device = device
         self.config = config or {}
-        
-        # Get furry classes from config or use default
-        self.furry_classes = set(
-            self.config.get('furry_classes', list(self.COCO_ANIMAL_CLASSES.values()))
-        )
         self.confidence_threshold = self.config.get('confidence_threshold', 0.5)
-        
-        self.model = None
         self.model_path = model_path
-        
-        # Try to load model
+        self.model = None
         self._load_model()
-    
+
     def _load_model(self):
-        """Load the YOLOv8 model"""
-        from ultralytics import YOLO
-        if self.model_path and Path(self.model_path).exists():
-            self.model = YOLO(self.model_path)
-        else:
-            self.model = YOLO('models/yolov8n.pt')
-        if self.device == 'cuda' and torch.cuda.is_available():
-            self.model.to('cuda')
-    
+        from speciesnet import SpeciesNet
+        if not self.model_path or not Path(self.model_path).exists():
+            raise FileNotFoundError(
+                f"SpeciesNet model directory not found: '{self.model_path}'. "
+                "Set models.speciesnet in configs/default.yaml."
+            )
+        # detector-only, no geofencing needed
+        self.model = SpeciesNet(self.model_path, components='detector', geofence=False)
+
     def detect_animals(
         self,
         image: np.ndarray,
-        filter_furry: bool = True
+        filter_furry: bool = True,
     ) -> List[Tuple[List[float], str, float]]:
         """
-        Detect animals in image
-        
+        Detect animals in image.
+
         Args:
-            image: RGB image (H, W, 3)
-            filter_furry: If True, only return furry animals
-            
+            image:        RGB numpy array (H, W, 3)
+            filter_furry: unused — kept for API compatibility
+
         Returns:
-            List of (bbox, class_name, confidence) tuples
-            bbox is [x1, y1, x2, y2]
+            List of (bbox_xyxy, label, confidence)
+            bbox_xyxy = [x1, y1, x2, y2] in pixel coordinates
         """
-        # Run inference
-        results = self.model(image, verbose=False, conf=self.confidence_threshold)
-        
+        h, w = image.shape[:2]
+
+        # SpeciesNet needs a file path; write to a temp PNG
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+            tmp_path = f.name
+        Image.fromarray(image).save(tmp_path)
+
+        result = self.model.detect(filepaths=[tmp_path], progress_bars=False)
+        Path(tmp_path).unlink(missing_ok=True)
+
         detections = []
-        
-        for result in results:
-            boxes = result.boxes
-            if boxes is None:
-                continue
-                
-            for box in boxes:
-                # Get box coordinates
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                
-                # Get class
-                class_id = int(box.cls[0].item())
-                confidence = float(box.conf[0].item())
-                
-                # Get class name
-                class_name = self.COCO_ANIMAL_CLASSES.get(class_id, f'class_{class_id}')
-                
-                # Filter for furry animals if requested
-                if filter_furry and class_name.lower() not in self.furry_classes:
+        for pred in result.get('predictions', []):
+            for d in pred.get('detections', []):
+                if d.get('category') != '1':          # only animals
                     continue
-                
-                detections.append(([float(x1), float(y1), float(x2), float(y2)], class_name, confidence))
-        
+                if d['conf'] < self.confidence_threshold:
+                    continue
+
+                xmin, ymin, bw, bh = d['bbox']        # normalized xywh
+                x1 = xmin * w
+                y1 = ymin * h
+                x2 = (xmin + bw) * w
+                y2 = (ymin + bh) * h
+                detections.append(([x1, y1, x2, y2], 'animal', float(d['conf'])))
+
         return detections
-    
-    def filter_furry_animals(
-        self,
-        detections: List[Tuple[List[float], str, float]]
-    ) -> List[Tuple[List[float], str, float]]:
-        """
-        Filter detections to only furry animals
-        
-        Args:
-            detections: List of (bbox, class_name, confidence)
-            
-        Returns:
-            Filtered detections
-        """
-        filtered = []
-        
-        for bbox, class_name, conf in detections:
-            if class_name.lower() in self.furry_classes:
-                filtered.append((bbox, class_name, conf))
-        
-        return filtered
-    
-    def filter_exclude_birds(
-        self,
-        detections: List[Tuple[List[float], str, float]]
-    ) -> List[Tuple[List[float], str, float]]:
-        """
-        Exclude bird detections
-        
-        Args:
-            detections: List of detections
-            
-        Returns:
-            Filtered detections without birds
-        """
-        return [
-            (bbox, class_name, conf)
-            for bbox, class_name, conf in detections
-            if class_name.lower() not in self.BIRD_CLASSES
-        ]
-    
-    def get_animal_count(self, detections: List[Tuple]) -> int:
-        """Get count of animal detections"""
-        return len(detections)
-    
-    def has_furry_animals(self, detections: List[Tuple]) -> bool:
-        """Check if any furry animals detected"""
-        return len(self.filter_furry_animals(detections)) > 0
 
 
 def create_speciesnet_detector(
     model_path: str = None,
     config: dict = None,
-    device: str = 'cuda'
+    device: str = 'cpu',
 ) -> SpeciesNetDetector:
-    """
-    Factory function to create SpeciesNet detector
-    
-    Args:
-        model_path: Path to model weights
-        config: Configuration dictionary
-        device: Device to run on
-        
-    Returns:
-        SpeciesNetDetector instance
-    """
+    """Factory function to create SpeciesNetDetector."""
     return SpeciesNetDetector(
         model_path=model_path,
         config=config,
-        device=device
+        device=device,
     )

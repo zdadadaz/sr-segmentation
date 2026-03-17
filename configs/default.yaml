@@ -4,7 +4,7 @@ device: cuda  # cuda or cpu
 
 # Model paths (absolute or relative to project root)
 models:
-  speciesnet: models/yolov8n.pt  # Will auto-download if not exists
+  speciesnet: models/speciesNet
   sam: models/sam_vit_h.pth
   bisenet: models/face_parsing.pth
   person_detector: models/yolov8n.pt
@@ -21,16 +21,6 @@ sam:
 # SpeciesNet settings
 speciesnet:
   confidence_threshold: 0.5
-  furry_classes:
-    # COCO classes detectable by YOLOv8
-    - cat
-    - dog
-    - horse
-    - cow
-    - sheep
-    - bear
-    - zebra
-    - giraffe
 
 # BiSeNet settings
 bisenet:
