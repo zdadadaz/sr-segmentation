@@ -1,0 +1,53 @@
+# Training Configuration
+# Used by train.py and train_gan.py via --config configs/train.yaml
+# CLI arguments always override values defined here.
+
+# ---------------------------------------------------------------------------
+# Dataset paths
+# ---------------------------------------------------------------------------
+data:
+  hr_dir: ~          # required
+  lr_dir: ~          # required
+  mask_dir: ~        # required
+
+# ---------------------------------------------------------------------------
+# Model architecture
+# ---------------------------------------------------------------------------
+model:
+  arch: unet         # rrdb | unet
+  model_type: sft    # sft | mask_concat
+  scale: 4
+  num_feat: 64
+
+# ---------------------------------------------------------------------------
+# Training hyperparameters
+# ---------------------------------------------------------------------------
+train:
+  epochs: 50
+  batch_size: 4
+  patch_size: 256    # HR crop size
+  lr: 1.0e-4
+  save_dir: experiments/run
+  device: auto       # auto (detect cuda) | cuda | cpu
+
+# ---------------------------------------------------------------------------
+# Loss settings  (train.py)
+# ---------------------------------------------------------------------------
+loss:
+  hair_weight: 2.0
+  other_weight: 1.0
+  use_perceptual: true
+  use_ssim: true
+
+# ---------------------------------------------------------------------------
+# GAN settings  (train_gan.py only)
+# ---------------------------------------------------------------------------
+gan:
+  pretrained_g: ~      # path to pretrained generator checkpoint from train.py
+  lr_g: 1.0e-4
+  lr_d: 1.0e-4
+  w_pixel: 1.0         # SegAwareLoss (L1) weight
+  w_perceptual: 0.1    # VGG perceptual loss weight
+  w_adv: 0.01          # adversarial loss weight (generator)
+  d_feat: 64           # discriminator base channels
+  save_every: 5        # save checkpoint every N epochs
