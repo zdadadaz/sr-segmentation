@@ -29,7 +29,7 @@ def _add_network_to_path():
         sys.path.insert(0, str(network_parent))
 
 
-def _adjust_bbox(x_min, y_min, x_max, y_max, img_w, img_h, margin_pct=50):
+def _adjust_bbox(x_min, y_min, x_max, y_max, img_w, img_h, margin_pct=15):
     w = x_max - x_min
     h = y_max - y_min
     dw = w * margin_pct / 100.0 / 2
@@ -185,6 +185,14 @@ class FaceXFormerParser:
             crop_w = bx2 - bx1
 
             seg_224 = self._run_on_face_crop(face_crop)  # (224, 224)
+
+            # Reject likely-failed segmentations: when background (class 0)
+            # covers < 20% of the crop, the model probably could not parse
+            # the face (e.g. side profile) and classified everything as skin,
+            # producing a solid-block artifact.
+            bg_ratio = (seg_224 == 0).sum() / seg_224.size
+            if bg_ratio < 0.20:
+                continue
 
             # Resize back to crop size
             seg_full = np.array(
