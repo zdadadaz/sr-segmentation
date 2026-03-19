@@ -21,12 +21,15 @@ pip install -r requirements.txt
 # 3. Prepare dataset
 python prepare_dataset.py --src_dir my_photos --output_dir data/v1
 
-# 4. Train (standard)
-python train.py --hr_dir data/v1/hr --lr_dir data/v1/lr --mask_dir data/v1/mask
+# 4. Edit training config
+#    Set data paths and hyperparameters in configs/train.yaml
 
-# 5. GAN fine-tune
-python train_gan.py --hr_dir data/v1/hr --lr_dir data/v1/lr --mask_dir data/v1/mask \
-  --pretrained_g experiments/sft/epoch_50.pth
+# 5. Train (standard)
+python train.py --config configs/train.yaml
+
+# 6. GAN fine-tune
+python train_gan.py --config configs/train.yaml \
+  --pretrained_g experiments/run/epoch_50.pth
 ```
 
 ---
@@ -54,7 +57,8 @@ sr-segmentation/
 ├── prepare_dataset.py          # Auto-labeling & dataset preparation
 ├── generate_dummy_data.py      # Quick-start dummy data generator
 ├── configs/
-│   └── default.yaml            # Configuration (models, training defaults)
+│   ├── default.yaml            # Segmentation pipeline configuration (models, thresholds)
+│   └── train.yaml              # SR training configuration (data paths, hyperparameters)
 ├── models/                     # Pre-trained model weights
 ├── tmp/
 │   └── facexformer-main/       # FaceXFormer network code (cloned from GitHub)
@@ -183,28 +187,36 @@ All 4 combinations (`rrdb+sft`, `rrdb+mask_concat`, `unet+sft`, `unet+mask_conca
 
 Pixel-level supervision only (SegAwareLoss = weighted L1 + perceptual + SSIM).
 
+Set data paths and hyperparameters in `configs/train.yaml`, then:
+
 ```bash
-python train.py \
-  --hr_dir data/my_dataset/hr \
-  --lr_dir data/my_dataset/lr \
-  --mask_dir data/my_dataset/mask \
+# Config-driven (recommended)
+python train.py --config configs/train.yaml
+
+# CLI overrides (any config value can be overridden)
+python train.py --config configs/train.yaml \
   --arch unet --model_type sft \
-  --epochs 50 --batch_size 4 \
-  --save_dir experiments/unet_sft
+  --epochs 50 --save_dir experiments/unet_sft
 ```
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--arch` | `rrdb` | `rrdb` or `unet` |
-| `--model_type` | `sft` | `sft` or `mask_concat` |
-| `--epochs` | 10 | Training epochs |
-| `--batch_size` | 4 | Batch size |
-| `--lr` | 1e-4 | Learning rate |
-| `--patch_size` | 256 | HR crop size |
-| `--scale` | 4 | SR scale factor |
-| `--hair_weight` | 2.0 | Loss weight for hair/fur regions |
-| `--no_perceptual` | — | Disable perceptual loss |
-| `--no_ssim` | — | Disable SSIM loss |
+| Argument | Config key | Default | Description |
+|----------|------------|---------|-------------|
+| `--config` | — | — | Path to training YAML config |
+| `--hr_dir` | `data.hr_dir` | — | Path to HR images (required) |
+| `--lr_dir` | `data.lr_dir` | — | Path to LR images (required) |
+| `--mask_dir` | `data.mask_dir` | — | Path to masks (required) |
+| `--arch` | `model.arch` | `rrdb` | `rrdb` or `unet` |
+| `--model_type` | `model.model_type` | `sft` | `sft` or `mask_concat` |
+| `--scale` | `model.scale` | 4 | SR scale factor |
+| `--epochs` | `train.epochs` | 10 | Training epochs |
+| `--batch_size` | `train.batch_size` | 4 | Batch size |
+| `--lr` | `train.lr` | 1e-4 | Learning rate |
+| `--patch_size` | `train.patch_size` | 256 | HR crop size |
+| `--save_dir` | `train.save_dir` | `experiments` | Checkpoint directory |
+| `--device` | `train.device` | `auto` | `cuda` / `cpu` / `auto` |
+| `--hair_weight` | `loss.hair_weight` | 2.0 | Loss weight for hair/fur regions |
+| `--no_perceptual` | `loss.use_perceptual` | — | Disable perceptual loss |
+| `--no_ssim` | `loss.use_ssim` | — | Disable SSIM loss |
 
 ---
 
@@ -218,35 +230,26 @@ Real-ESRGAN-style adversarial training. Typically used to fine-tune a pretrained
 
 ```bash
 # Step 1: pretrain generator with pixel loss
-python train.py \
-  --arch unet --model_type sft \
-  --hr_dir data/my_dataset/hr \
-  --lr_dir data/my_dataset/lr \
-  --mask_dir data/my_dataset/mask \
-  --epochs 50 --save_dir experiments/unet_sft_pretrain
+python train.py --config configs/train.yaml \
+  --epochs 50 --save_dir experiments/pretrain
 
-# Step 2: GAN fine-tune
-python train_gan.py \
-  --arch unet --model_type sft \
-  --hr_dir data/my_dataset/hr \
-  --lr_dir data/my_dataset/lr \
-  --mask_dir data/my_dataset/mask \
-  --pretrained_g experiments/unet_sft_pretrain/epoch_50.pth \
-  --epochs 100 --save_dir experiments/unet_sft_gan
+# Step 2: GAN fine-tune (set gan.pretrained_g in config or pass via CLI)
+python train_gan.py --config configs/train.yaml \
+  --pretrained_g experiments/pretrain/epoch_50.pth \
+  --epochs 100 --save_dir experiments/gan
 ```
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--arch` | `unet` | Generator architecture |
-| `--model_type` | `sft` | Mask integration mode |
-| `--pretrained_g` | — | Warm-start from `train.py` checkpoint |
-| `--lr_g` | 1e-4 | Generator learning rate |
-| `--lr_d` | 1e-4 | Discriminator learning rate |
-| `--w_pixel` | 1.0 | SegAwareLoss weight |
-| `--w_perceptual` | 0.1 | VGG perceptual loss weight |
-| `--w_adv` | 0.01 | Adversarial loss weight |
-| `--d_feat` | 64 | Discriminator base channels |
-| `--save_every` | 5 | Save checkpoint every N epochs |
+| Argument | Config key | Default | Description |
+|----------|------------|---------|-------------|
+| `--config` | — | — | Path to training YAML config |
+| `--pretrained_g` | `gan.pretrained_g` | — | Warm-start from `train.py` checkpoint |
+| `--lr_g` | `gan.lr_g` | 1e-4 | Generator learning rate |
+| `--lr_d` | `gan.lr_d` | 1e-4 | Discriminator learning rate |
+| `--w_pixel` | `gan.w_pixel` | 1.0 | SegAwareLoss weight |
+| `--w_perceptual` | `gan.w_perceptual` | 0.1 | VGG perceptual loss weight |
+| `--w_adv` | `gan.w_adv` | 0.01 | Adversarial loss weight |
+| `--d_feat` | `gan.d_feat` | 64 | Discriminator base channels |
+| `--save_every` | `gan.save_every` | 5 | Save checkpoint every N epochs |
 
 Checkpoints are saved as `epoch_N_G.pth` and `epoch_N_D.pth` separately.
 
@@ -265,3 +268,4 @@ Checkpoints are saved as `epoch_N_G.pth` and `epoch_N_D.pth` separately.
 - [x] PR9: FaceXFormer as alternative face parser (config-selectable)
 - [x] PR10: `mask_concat` training mode (RRDBNet 4-ch input, no SFT)
 - [x] PR11: UNetSR + SegGuidedUNetSR architectures; VGGDiscriminator; GAN training (`train_gan.py`)
+- [x] PR12: `configs/train.yaml` — unified training config; `--config` flag for both training scripts
