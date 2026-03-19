@@ -21,8 +21,12 @@ pip install -r requirements.txt
 # 3. Prepare dataset
 python prepare_dataset.py --src_dir my_photos --output_dir data/v1
 
-# 4. Train
+# 4. Train (standard)
 python train.py --hr_dir data/v1/hr --lr_dir data/v1/lr --mask_dir data/v1/mask
+
+# 5. GAN fine-tune
+python train_gan.py --hr_dir data/v1/hr --lr_dir data/v1/lr --mask_dir data/v1/mask \
+  --pretrained_g experiments/sft/epoch_50.pth
 ```
 
 ---
@@ -40,14 +44,17 @@ sr-segmentation/
 │   ├── mask_merger.py          # Mask merging logic
 │   ├── texture_classifier.py   # Gabor texture fallback
 │   ├── realesrgan_arch.py      # RRDBNet / SegGuidedRRDBNet architectures
+│   ├── unet.py                 # UNetSR / SegGuidedUNetSR architectures
+│   ├── discriminator.py        # VGGDiscriminator for GAN training
 │   ├── dataset.py              # Training dataset loader
 │   ├── dataset_generator.py    # Auto-labeling tool
-│   └── sr_integration.py       # SFT blocks + SegAwareLoss
-├── train.py                    # Main training script
+│   └── sr_integration.py       # SFTBlock + SegAwareLoss
+├── train.py                    # Standard (non-GAN) training script
+├── train_gan.py                # GAN training script
 ├── prepare_dataset.py          # Auto-labeling & dataset preparation
 ├── generate_dummy_data.py      # Quick-start dummy data generator
 ├── configs/
-│   └── default.yaml            # Configuration (models, thresholds, face_parser)
+│   └── default.yaml            # Configuration (models, training defaults)
 ├── models/                     # Pre-trained model weights
 ├── tmp/
 │   └── facexformer-main/       # FaceXFormer network code (cloned from GitHub)
@@ -61,10 +68,8 @@ sr-segmentation/
 **Requires Python 3.12** (speciesnet depends on yolov5 which is incompatible with Python ≥3.13).
 
 ```bash
-# Create venv
 python3.12 -m venv venv
 source venv/bin/activate
-
 pip install -r requirements.txt
 
 # reverse_geocoder (speciesnet dependency) must be installed via conda on macOS
@@ -85,7 +90,7 @@ Download and place in `models/`:
 | FaceXFormer | `facexfromer.pt` | Face parsing (alternative) | [FaceXFormer releases](https://github.com/pranavphoenix/FaceXFormer) |
 | YOLOv8n | `yolov8n.pt` | Person detection | [ultralytics](https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt) |
 
-FaceXFormer also requires its network code in `tmp/facexformer-main/`:
+FaceXFormer also requires its network code:
 ```bash
 git clone https://github.com/pranavphoenix/FaceXFormer tmp/facexformer-main
 ```
@@ -106,10 +111,16 @@ The pipeline runs 5 steps on each image:
    classifier fallback
 ```
 
-**Face parser selection** — edit `configs/default.yaml`:
+**Face parser selection** — `configs/default.yaml`:
 ```yaml
-face_parser: bisenet       # default, CelebAMask-HQ 19-class
-# face_parser: facexformer  # LaPa 11-class, better for non-frontal faces
+face_parser: bisenet       # CelebAMask-HQ 19-class
+# face_parser: facexformer  # LaPa 11-class; use_classifier for mammals only
+```
+
+**SpeciesNet classifier** (opt-in, filters non-mammal animals):
+```yaml
+speciesnet:
+  use_classifier: true   # enables EfficientNet V2; slower but filters birds/reptiles
 ```
 
 ### Programmatic Usage
@@ -119,73 +130,72 @@ from PIL import Image
 from src.pipeline import SegmentationPipeline
 
 pipeline = SegmentationPipeline()  # loads configs/default.yaml
+result = pipeline.segment(Image.open("photo.jpg"))
 
-img = Image.open("photo.jpg")
-result = pipeline.segment(img)
-
-hair_mask  = result.final_mask          # (H, W) uint8 binary mask
-soft_mask  = result.get_soft_mask(3.0)  # Gaussian-blurred for SR blending
+hair_mask = result.final_mask          # (H, W) uint8 binary mask
+soft_mask = result.get_soft_mask(3.0)  # Gaussian-blurred for SR blending
 ```
 
 ---
 
 ## Dataset Preparation
 
-### A. Auto-label real images
-
 ```bash
+# Auto-label real images
 python prepare_dataset.py \
   --src_dir path/to/hr_images \
   --output_dir data/my_dataset \
   --scale 4
-```
 
-Produces `hr/`, `lr/`, and `mask/` subdirectories and a `split.json`.
-
-### B. Dummy data (quick smoke test)
-
-```bash
+# Quick smoke test with synthetic data
 python generate_dummy_data.py
 ```
+
+Produces `hr/`, `lr/`, and `mask/` subdirectories plus a `split.json`.
 
 ---
 
 ## Training
 
-Two training modes are available via `--model_type`:
+### Generator Architectures
 
-### `sft` (default) — Segmentation-guided with SFT injection
+Two architectures are available via `--arch`:
 
-Uses `SegGuidedRRDBNet`: the mask is injected into the feature space via **Spatial Feature Transform (SFT)** blocks before and after the RRDB body.
+| `--arch` | Model | Description |
+|----------|-------|-------------|
+| `rrdb` (default) | `RRDBNet` / `SegGuidedRRDBNet` | Real-ESRGAN backbone, 23 RRDB blocks |
+| `unet` | `UNetSR` / `SegGuidedUNetSR` | 2-level U-Net with PixelShuffle output |
+
+### Mask Integration Modes
+
+Two modes are available via `--model_type`:
+
+| `--model_type` | Description |
+|----------------|-------------|
+| `sft` (default) | Mask injected into feature space via **SFT** (Spatial Feature Transform) blocks |
+| `mask_concat` | Mask concatenated to LR image as 4th channel (`num_in_ch=4`); no SFT layers |
+
+All 4 combinations (`rrdb+sft`, `rrdb+mask_concat`, `unet+sft`, `unet+mask_concat`) are supported.
+
+---
+
+### Standard Training (`train.py`)
+
+Pixel-level supervision only (SegAwareLoss = weighted L1 + perceptual + SSIM).
 
 ```bash
 python train.py \
   --hr_dir data/my_dataset/hr \
   --lr_dir data/my_dataset/lr \
   --mask_dir data/my_dataset/mask \
-  --model_type sft \
+  --arch unet --model_type sft \
   --epochs 50 --batch_size 4 \
-  --save_dir experiments/sft
+  --save_dir experiments/unet_sft
 ```
-
-### `mask_concat` — Mask concatenated to input, no SFT
-
-Uses a plain `RRDBNet(num_in_ch=4)`: the mask is simply concatenated to the LR image as a 4th channel before the network. No SFT layers.
-
-```bash
-python train.py \
-  --hr_dir data/my_dataset/hr \
-  --lr_dir data/my_dataset/lr \
-  --mask_dir data/my_dataset/mask \
-  --model_type mask_concat \
-  --epochs 50 --batch_size 4 \
-  --save_dir experiments/mask_concat
-```
-
-### Common training arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
+| `--arch` | `rrdb` | `rrdb` or `unet` |
 | `--model_type` | `sft` | `sft` or `mask_concat` |
 | `--epochs` | 10 | Training epochs |
 | `--batch_size` | 4 | Batch size |
@@ -196,7 +206,49 @@ python train.py \
 | `--no_perceptual` | — | Disable perceptual loss |
 | `--no_ssim` | — | Disable SSIM loss |
 
-Both modes use `SegAwareLoss` which applies higher pixel-level loss weight to hair/fur regions.
+---
+
+### GAN Training (`train_gan.py`)
+
+Real-ESRGAN-style adversarial training. Typically used to fine-tune a pretrained generator.
+
+**Losses:**
+- **Generator**: `w_pixel` × SegAwareLoss(L1) + `w_perceptual` × VGG perceptual + `w_adv` × LSGAN
+- **Discriminator**: LSGAN (MSE, real=1 / fake=0) — more stable than standard BCE
+
+```bash
+# Step 1: pretrain generator with pixel loss
+python train.py \
+  --arch unet --model_type sft \
+  --hr_dir data/my_dataset/hr \
+  --lr_dir data/my_dataset/lr \
+  --mask_dir data/my_dataset/mask \
+  --epochs 50 --save_dir experiments/unet_sft_pretrain
+
+# Step 2: GAN fine-tune
+python train_gan.py \
+  --arch unet --model_type sft \
+  --hr_dir data/my_dataset/hr \
+  --lr_dir data/my_dataset/lr \
+  --mask_dir data/my_dataset/mask \
+  --pretrained_g experiments/unet_sft_pretrain/epoch_50.pth \
+  --epochs 100 --save_dir experiments/unet_sft_gan
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--arch` | `unet` | Generator architecture |
+| `--model_type` | `sft` | Mask integration mode |
+| `--pretrained_g` | — | Warm-start from `train.py` checkpoint |
+| `--lr_g` | 1e-4 | Generator learning rate |
+| `--lr_d` | 1e-4 | Discriminator learning rate |
+| `--w_pixel` | 1.0 | SegAwareLoss weight |
+| `--w_perceptual` | 0.1 | VGG perceptual loss weight |
+| `--w_adv` | 0.01 | Adversarial loss weight |
+| `--d_feat` | 64 | Discriminator base channels |
+| `--save_every` | 5 | Save checkpoint every N epochs |
+
+Checkpoints are saved as `epoch_N_G.pth` and `epoch_N_D.pth` separately.
 
 ---
 
@@ -212,3 +264,4 @@ Both modes use `SegAwareLoss` which applies higher pixel-level loss weight to ha
 - [x] PR8: Replace YOLOv8 COCO with SpeciesNet for better wildlife detection
 - [x] PR9: FaceXFormer as alternative face parser (config-selectable)
 - [x] PR10: `mask_concat` training mode (RRDBNet 4-ch input, no SFT)
+- [x] PR11: UNetSR + SegGuidedUNetSR architectures; VGGDiscriminator; GAN training (`train_gan.py`)
