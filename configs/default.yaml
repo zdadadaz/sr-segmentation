@@ -1,7 +1,7 @@
 
 # SR Segmentation Configuration
 
-device: cuda  # cuda or cpu
+device: cpu  # cuda or cpu
 
 # Model paths (absolute or relative to project root)
 models:
@@ -26,7 +26,7 @@ speciesnet:
   use_classifier: false  # true: filter non-mammal animals via EfficientNet V2 classifier (slower)
 
 # Face parser selection: 'bisenet' or 'facexformer'
-face_parser: facexformer
+face_parser: bisenet
 
 # BiSeNet settings
 bisenet:
@@ -59,3 +59,28 @@ output:
   save_masks: true
   save_visualization: true
   output_dir: output
+
+# SR Training (train.py / train_gan.py defaults)
+training:
+  # Generator architecture: 'rrdb' or 'unet'
+  arch: unet
+  # Mask integration mode: 'sft' (Spatial Feature Transform) or 'mask_concat' (4-ch input)
+  model_type: sft
+  scale: 4
+  num_feat: 64
+  patch_size: 256
+  batch_size: 4
+  epochs: 50
+  lr: 1.0e-4
+  hair_weight: 2.0
+  other_weight: 1.0
+
+# GAN-specific settings (train_gan.py)
+gan:
+  lr_g: 1.0e-4
+  lr_d: 1.0e-4
+  w_pixel: 1.0        # seg-aware L1 pixel loss weight
+  w_perceptual: 0.1   # VGG perceptual loss weight
+  w_adv: 0.01         # adversarial loss weight (generator)
+  d_feat: 64          # discriminator base channel count
+  save_every: 5       # save checkpoint every N epochs

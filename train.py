@@ -11,11 +11,39 @@ from tqdm import tqdm
 from pathlib import Path
 
 from src.realesrgan_arch import SegGuidedRRDBNet, RRDBNet
+from src.unet import UNetSR, SegGuidedUNetSR
 from src.dataset import create_dataloader
 from src.sr_integration import SegAwareLoss
 
+
+def build_model(arch: str, model_type: str, scale: int, device: str):
+    """Instantiate generator based on --arch and --model_type."""
+    if arch == 'unet':
+        if model_type == 'mask_concat':
+            return UNetSR(num_in_ch=4, num_out_ch=3, num_feat=64, scale=scale).to(device)
+        else:  # sft
+            return SegGuidedUNetSR(num_in_ch=3, num_out_ch=3, num_feat=64, scale=scale, num_seg_classes=2).to(device)
+    else:  # rrdb
+        if model_type == 'mask_concat':
+            return RRDBNet(num_in_ch=4, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale).to(device)
+        else:  # sft
+            return SegGuidedRRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale, num_seg_classes=2).to(device)
+
+
+def forward_model(model, lr_img, mask, model_type):
+    """Run generator forward pass, handling mask-concat vs SFT."""
+    if model_type == 'mask_concat':
+        mask_ch = mask if mask.ndim == 4 else mask.unsqueeze(1)
+        mask_ch = mask_ch.float()
+        if mask_ch.shape[2:] != lr_img.shape[2:]:
+            mask_ch = torch.nn.functional.interpolate(mask_ch, size=lr_img.shape[2:], mode='nearest')
+        return model(torch.cat([lr_img, mask_ch], dim=1))
+    else:
+        return model(lr_img, seg_map=mask)
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train Seg-Guided Real-ESRGAN')
+    parser = argparse.ArgumentParser(description='Train Seg-Guided SR (RRDB or UNet)')
     parser.add_argument('--hr_dir', type=str, required=True, help='Path to HR images')
     parser.add_argument('--lr_dir', type=str, required=True, help='Path to LR images')
     parser.add_argument('--mask_dir', type=str, required=True, help='Path to segmentation masks')
@@ -27,14 +55,12 @@ def parse_args():
     parser.add_argument('--save_dir', type=str, default='experiments', help='Directory to save checkpoints')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
 
-    # Model type
+    # Architecture
+    parser.add_argument('--arch', type=str, default='rrdb', choices=['rrdb', 'unet'],
+                        help='Generator architecture: rrdb (default) or unet')
     parser.add_argument(
         '--model_type', type=str, default='sft', choices=['sft', 'mask_concat'],
-        help=(
-            'sft: SegGuidedRRDBNet with SFT injection (default). '
-            'mask_concat: standard RRDBNet with mask concatenated to LR input (4-ch), no SFT.'
-        )
-    )
+        help='sft: inject mask via SFT (default). mask_concat: concat mask as 4th input channel.')
 
     # Loss args
     parser.add_argument('--hair_weight', type=float, default=2.0, help='Weight for hair/fur regions')
@@ -66,27 +92,8 @@ def main():
     print(f"Dataset size: {len(train_loader.dataset)}")
     
     # Initialize Model
-    print(f"Initializing Model (model_type={args.model_type})...")
-    if args.model_type == 'mask_concat':
-        # Mask is concatenated to LR as an extra channel; no SFT.
-        model = RRDBNet(
-            num_in_ch=4,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=23,
-            num_grow_ch=32,
-            scale=args.scale,
-        ).to(args.device)
-    else:
-        model = SegGuidedRRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=23,
-            num_grow_ch=32,
-            scale=args.scale,
-            num_seg_classes=2,
-        ).to(args.device)
+    print(f"Initializing Model (arch={args.arch}, model_type={args.model_type})...")
+    model = build_model(args.arch, args.model_type, args.scale, args.device)
     
     # Initialize Loss
     print("Initializing SegAwareLoss...")
@@ -113,20 +120,7 @@ def main():
             mask = batch['mask'].to(args.device)
             
             optimizer.zero_grad()
-
-            # Forward pass
-            if args.model_type == 'mask_concat':
-                # Ensure mask has shape (B, 1, H, W) before concatenating
-                mask_ch = mask if mask.ndim == 4 else mask.unsqueeze(1)
-                mask_ch = mask_ch.float()
-                if mask_ch.shape[2:] != lr_img.shape[2:]:
-                    mask_ch = torch.nn.functional.interpolate(
-                        mask_ch, size=lr_img.shape[2:], mode='nearest'
-                    )
-                lr_with_mask = torch.cat([lr_img, mask_ch], dim=1)
-                sr_out = model(lr_with_mask)
-            else:
-                sr_out = model(lr_img, seg_map=mask)
+            sr_out = forward_model(model, lr_img, mask, args.model_type)
 
             # Compute loss
             loss = criterion(sr_out, hr_img, mask)
@@ -145,6 +139,7 @@ def main():
         save_path = os.path.join(args.save_dir, f"epoch_{epoch}.pth")
         torch.save({
             'epoch': epoch,
+            'arch': args.arch,
             'model_type': args.model_type,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
