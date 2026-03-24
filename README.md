@@ -264,6 +264,52 @@ Checkpoints are saved as `epoch_N_G.pth`, `epoch_N_D.pth`, and `epoch_N_G_ema.pt
 
 ---
 
+## Inference
+
+Run super-resolution on local images using matching masks.
+
+```bash
+python inference.py \
+  --input data/test2 \
+  --mask_dir output/masks \
+  --model_path experiments/run/epoch_50_G.pth \
+  --config configs/train.yaml \
+  --output output/inference_results
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--input` | Folder containing low-resolution images |
+| `--mask_dir` | Folder containing matching segmentation masks |
+| `--model_path`| Path to the trained generator `.pth` file |
+| `--config` | (Optional) Path to `train.yaml` to auto-load arch/scale |
+| `--output` | Where to save SR results |
+| `--arch` | `rrdb` or `unet` (overrides config) |
+| `--model_type`| `sft` or `mask_concat` (overrides config) |
+| `--scale` | Super-resolution scale (overrides config) |
+
+---
+
+## Validation
+
+You can enable automatic validation (inference on a test set) during training. Results are saved in `experiments/run/validation/epoch_N/`.
+
+**Config (`configs/train.yaml`):**
+```yaml
+validation:
+  enabled: true
+  val_lr_dir: data/val/lr
+  val_mask_dir: data/val/mask
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--val_enabled` | Enable validation during training |
+| `--val_lr_dir` | Path to validation LR images |
+| `--val_mask_dir` | Path to validation masks |
+
+---
+
 ## PR Progress
 
 - [x] PR1: Project scaffold + inference pipeline skeleton
@@ -280,3 +326,5 @@ Checkpoints are saved as `epoch_N_G.pth`, `epoch_N_D.pth`, and `epoch_N_G_ema.pt
 - [x] PR12: `configs/train.yaml` — unified training config; `--config` flag for both training scripts
 - [x] PR13: EMA support for Generator fine-tuning; Multi-layer VGG19 Perpetual loss
 - [x] PR14: Configurable pixel & GAN loss types (L1/L2) via training config; `prepare_dataset --mask_dir` support
+- [x] PR15: Dedicated `inference.py` script for batch processing with external masks
+- [x] PR16: Validation mechanism in `train.py` and `train_gan.py`; save progress images during training

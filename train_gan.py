@@ -24,7 +24,7 @@ from tqdm import tqdm
 from src.dataset import create_dataloader
 from src.discriminator import VGGDiscriminator
 from src.sr_integration import SegAwareLoss
-from train import build_model, forward_model
+from train import build_model, forward_model, run_validation
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +127,12 @@ def _apply_config(args, cfg):
     if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
     if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'l2')
 
+    # Validation
+    val_cfg = cfg.get('validation', {}) or {}
+    if args.val_enabled is None:  args.val_enabled = val_cfg.get('enabled', False)
+    if args.val_lr_dir is None:   args.val_lr_dir = val_cfg.get('val_lr_dir')
+    if args.val_mask_dir is None: args.val_mask_dir = val_cfg.get('val_mask_dir')
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -173,6 +179,11 @@ def parse_args():
     parser.add_argument('--save_every',   type=int,   default=None, help='Save checkpoint every N epochs')
     parser.add_argument('--ema_decay',    type=float, default=None, help='Generator EMA decay')
     parser.add_argument('--gan_loss_type', type=str,  default=None, choices=['l1', 'l2'], help='GAN loss: l1 | l2')
+
+    # Validation
+    parser.add_argument('--val_enabled', action='store_true', default=None, help='Enable validation during training')
+    parser.add_argument('--val_lr_dir', type=str, default=None, help='Path to validation LR images')
+    parser.add_argument('--val_mask_dir', type=str, default=None, help='Path to validation masks')
 
     args = parser.parse_args()
 
@@ -337,8 +348,16 @@ def main():
             f"D={totals['d']/n:.4f}"
         )
 
+        # ---- Save Checkpoints ----------------------------------------------
         if epoch % args.save_every == 0 or epoch == args.epochs:
+            # Run validation
+            if args.val_enabled:
+                run_validation(netG, args, epoch, name_prefix="G_")
+                if netG_ema:
+                    run_validation(netG_ema, args, epoch, name_prefix="G_EMA_")
+
             base = os.path.join(args.save_dir, f"epoch_{epoch}")
+            
             torch.save({
                 'epoch': epoch,
                 'arch': args.arch,

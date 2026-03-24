@@ -80,6 +80,12 @@ def _apply_config(args, cfg):
     if not args.no_ssim:
         args.no_ssim = not loss_cfg.get('use_ssim', True)
 
+    # Validation
+    val_cfg = cfg.get('validation', {}) or {}
+    if args.val_enabled is None:  args.val_enabled = val_cfg.get('enabled', False)
+    if args.val_lr_dir is None:   args.val_lr_dir = val_cfg.get('val_lr_dir')
+    if args.val_mask_dir is None: args.val_mask_dir = val_cfg.get('val_mask_dir')
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Seg-Guided SR (RRDB or UNet)')
@@ -115,6 +121,11 @@ def parse_args():
     parser.add_argument('--pixel_loss_type', type=str, default=None, choices=['l1', 'l2'], 
                         help='Pixel loss type: l1 | l2 (mse)')
 
+    # Validation
+    parser.add_argument('--val_enabled', action='store_true', default=None, help='Enable validation during training')
+    parser.add_argument('--val_lr_dir', type=str, default=None, help='Path to validation LR images')
+    parser.add_argument('--val_mask_dir', type=str, default=None, help='Path to validation masks')
+
     args = parser.parse_args()
 
     # Load YAML config and fill unset args
@@ -131,6 +142,62 @@ def parse_args():
         parser.error(f"Missing required fields: {', '.join(missing)} (pass via CLI or config data section)")
 
     return args
+
+
+@torch.no_grad()
+def run_validation(model, args, epoch, name_prefix=""):
+    """
+    Run inference on validation folder and save images.
+    """
+    from pathlib import Path
+    from PIL import Image
+    import torchvision.transforms.functional as TF
+
+    if not args.val_enabled or not args.val_lr_dir or not args.val_mask_dir:
+        return
+
+    val_out_dir = os.path.join(args.save_dir, 'validation', f'epoch_{epoch}')
+    os.makedirs(val_out_dir, exist_ok=True)
+    
+    val_lr_path = Path(args.val_lr_dir)
+    val_mask_path = Path(args.val_mask_dir)
+    exts = ['.png', '.jpg', '.jpeg', '.webp']
+    images = sorted([p for p in val_lr_path.glob('*') if p.suffix.lower() in exts])
+    
+    if not images:
+        print(f"  [Val] No images found in {args.val_lr_dir}")
+        return
+
+    model.eval()
+    device = next(model.parameters()).device
+    
+    print(f"  [Val] Running validation on {len(images)} images -> {val_out_dir}")
+    # Process max 10 images for speed during training if desired, but here we do all
+    for img_path in images:
+        # Load LR
+        lr_pil = Image.open(img_path).convert('RGB')
+        lr_tensor = TF.to_tensor(lr_pil).unsqueeze(0).to(device)
+        
+        # Load Mask
+        m_path = val_mask_path / (img_path.stem + '.png')
+        if not m_path.exists(): m_path = val_mask_path / img_path.name
+        
+        if m_path.exists():
+            mask_pil = Image.open(m_path).convert('L')
+            mask_tensor = TF.to_tensor(mask_pil).unsqueeze(0).to(device)
+            mask_tensor = (mask_tensor > 0.5).float()
+        else:
+            # Fallback empty mask
+            mask_tensor = torch.zeros((1, 1, lr_pil.height * args.scale, lr_pil.width * args.scale), device=device)
+            
+        # Inference
+        sr_tensor = forward_model(model, lr_tensor, mask_tensor, args.model_type)
+        
+        # Save
+        sr_pil = TF.to_pil_image(sr_tensor.squeeze(0).clamp(0, 1))
+        sr_pil.save(os.path.join(val_out_dir, f"{name_prefix}{img_path.stem}.png"))
+    
+    model.train()
 
 
 def main():
@@ -188,6 +255,10 @@ def main():
 
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch}/{args.epochs}] Average Loss: {avg_loss:.4f}")
+
+        # Run validation
+        if args.val_enabled:
+            run_validation(model, args, epoch)
 
         save_path = os.path.join(args.save_dir, f"epoch_{epoch}.pth")
         torch.save({

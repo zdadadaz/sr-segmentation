@@ -54,3 +54,11 @@ gan:
   d_feat: 64           # Discriminator base channels
   save_every: 5        # Save checkpoint every N epochs
   ema_decay: 0.999     # Exponential Moving Average decay for Generator weights (0 to disable)
+# ---------------------------------------------------------------------------
+# Validation settings
+# ---------------------------------------------------------------------------
+validation:
+  enabled: true
+  val_lr_dir: ~        # Path to validation LR images
+  val_mask_dir: ~      # Path to validation masks
+  save_val_imgs: true  # Save SR results during validation

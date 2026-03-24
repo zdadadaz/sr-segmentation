@@ -89,6 +89,8 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--img_size', type=int, default=256, help='Image resize dimension')
     parser.add_argument('--save_dir', type=str, default='models/segmentation', help='Directory to save model weights')
+    parser.add_argument('--val_images_dir', type=str, default=None, help='Path to validation images')
+    parser.add_argument('--val_masks_dir', type=str, default=None, help='Path to validation masks')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
     return parser.parse_args()
 
@@ -114,6 +116,18 @@ def main():
         num_workers=4,
         pin_memory=True
     )
+    
+    val_loader = None
+    if args.val_images_dir and args.val_masks_dir:
+        val_dataset = HairSegDataset(
+            images_dir=args.val_images_dir,
+            masks_dir=args.val_masks_dir,
+            img_size=args.img_size,
+            is_train=False
+        )
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+        print(f"📉 Validation dataset size: {len(val_dataset)} images")
+
     print(f"📉 Dataset size: {len(train_dataset)} images")
     
     # Model
@@ -153,6 +167,30 @@ def main():
             
         avg_loss = total_loss / len(train_loader)
         print(f"📊 Epoch [{epoch}/{args.epochs}] Average Loss: {avg_loss:.4f}")
+        
+        # Validation Loop
+        if val_loader:
+            model.eval()
+            val_loss = 0.0
+            val_out_dir = os.path.join(args.save_dir, 'validation', f'epoch_{epoch}')
+            os.makedirs(val_out_dir, exist_ok=True)
+            
+            with torch.no_grad():
+                for i, (images, masks) in enumerate(val_loader):
+                    images = images.to(args.device)
+                    masks = masks.to(args.device)
+                    outputs = model(images)['out']
+                    loss = criterion(outputs, masks)
+                    val_loss += loss.item()
+                    
+                    # Save first batch for qualitative check
+                    if i == 0:
+                        preds = torch.sigmoid(outputs)
+                        for j in range(min(preds.size(0), 4)):
+                            pred_pil = TF.to_pil_image(preds[j].cpu())
+                            pred_pil.save(os.path.join(val_out_dir, f"sample_{j}.png"))
+            
+            print(f"🧪 Epoch [{epoch}/{args.epochs}] Validation Loss: {val_loss / len(val_loader):.4f}")
         
         # Save checkpoint periodically or at the end
         if epoch % 5 == 0 or epoch == args.epochs:
