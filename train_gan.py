@@ -24,7 +24,7 @@ from tqdm import tqdm
 from src.dataset import create_dataloader
 from src.discriminator import VGGDiscriminator
 from src.sr_integration import SegAwareLoss
-from train import build_model, forward_model, run_validation
+from train import build_model, run_validation
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +295,7 @@ def main():
             optD.zero_grad()
 
             with torch.no_grad():
-                sr = forward_model(netG, lr, mask, args.model_type)
+                sr = netG(lr, mask)
 
             d_real = netD(hr)
             d_fake = netD(sr.detach())
@@ -309,7 +309,7 @@ def main():
             # ----------------------------------------------------------------
             optG.zero_grad()
 
-            sr = forward_model(netG, lr, mask, args.model_type)
+            sr = netG(lr, mask)
 
             loss_pix = criterion_pixel(sr, hr, mask)
             loss_per = criterion_perceptual(sr, hr)

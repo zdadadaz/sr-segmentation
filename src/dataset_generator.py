@@ -36,7 +36,9 @@ class DatasetGenerator:
         images_subdir: str = 'hr',
         lr_subdir: str = 'lr',
         masks_subdir: str = 'mask',
-        scale: int = 4
+        scale: int = 4,
+        tile_size: int = None,
+        step: int = None
     ):
         """
         Initialize dataset generator
@@ -48,6 +50,8 @@ class DatasetGenerator:
             lr_subdir: Subdirectory for LR images
             masks_subdir: Subdirectory for masks
             scale: Downsampling scale for LR images
+            tile_size: Size of HR tiles (if None, process full image)
+            step: Stride for tiling (defaults to tile_size)
         """
         self.pipeline = pipeline
         self.output_dir = Path(output_dir)
@@ -55,6 +59,8 @@ class DatasetGenerator:
         self.lr_dir = self.output_dir / lr_subdir
         self.masks_dir = self.output_dir / masks_subdir
         self.scale = scale
+        self.tile_size = tile_size
+        self.step = step or tile_size
         
         # Create directories
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -156,8 +162,16 @@ class DatasetGenerator:
         
         # Ensure image is divisible by scale (for clean downsampling)
         h, w = image_np.shape[:2]
-        new_h = (h // self.scale) * self.scale
-        new_w = (w // self.scale) * self.scale
+        
+        # If tiling is active, ensure image is at least tile_size
+        target_h, target_w = h, w
+        if self.tile_size:
+            target_h = max(h, self.tile_size)
+            target_w = max(w, self.tile_size)
+            
+        new_h = (target_h // self.scale) * self.scale
+        new_w = (target_w // self.scale) * self.scale
+        
         if new_h != h or new_w != w:
             image_np = cv2.resize(image_np, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
             h, w = new_h, new_w
@@ -199,22 +213,68 @@ class DatasetGenerator:
             # Create mask from result
             mask = self._create_output_mask(result, (h, w))
         
-        # Save HR image
-        Image.fromarray(image_np).save(output_image_path)
-        
-        # Create and save LR image
-        lr_h, lr_w = h // self.scale, w // self.scale
-        lr_img = cv2.resize(image_np, (lr_w, lr_h), interpolation=cv2.INTER_CUBIC)
-        Image.fromarray(lr_img).save(output_lr_path)
-        
-        # Save mask
-        mask_img = Image.fromarray(mask)
-        mask_img.save(output_mask_path)
-        
-        # Update statistics
-        self._update_stats(result, mask)
-        
-        return str(output_image_path)
+        # Tiling logic
+        if self.tile_size:
+            rows = ((h - self.tile_size) // self.step) + 1 if h >= self.tile_size else 1
+            cols = ((w - self.tile_size) // self.step) + 1 if w >= self.tile_size else 1
+            
+            tile_count = 0
+            for r in range(rows):
+                for c in range(cols):
+                    y0, x0 = r * self.step, c * self.step
+                    y1, x1 = y0 + self.tile_size, x0 + self.tile_size
+                    
+                    # Boundary check
+                    if y1 > h: y1, y0 = h, h - self.tile_size
+                    if x1 > w: x1, x0 = w, w - self.tile_size
+                    
+                    hr_tile = image_np[y0:y1, x0:x1]
+                    mask_tile = mask[y0:y1, x0:x1]
+                    
+                    # Output paths for tile
+                    tile_suffix = f"_tile_{r}_{c}.png"
+                    t_hr_path = self.images_dir / (image_path.stem + tile_suffix)
+                    t_lr_path = self.lr_dir / (image_path.stem + tile_suffix)
+                    t_mask_path = self.masks_dir / (image_path.stem + tile_suffix)
+                    
+                    # HR
+                    Image.fromarray(hr_tile).save(t_hr_path)
+                    
+                    # LR (downsample HR tile)
+                    lr_tile_h, lr_tile_w = self.tile_size // self.scale, self.tile_size // self.scale
+                    lr_tile = cv2.resize(hr_tile, (lr_tile_w, lr_tile_h), interpolation=cv2.INTER_CUBIC)
+                    Image.fromarray(lr_tile).save(t_lr_path)
+                    
+                    # Mask
+                    Image.fromarray(mask_tile).save(t_mask_path)
+                    
+                    # Stats (treating tile as a result - partial result for stats)
+                    # We create a simple result object for stats update
+                    from src.pipeline import SegmentationResult
+                    tile_res = SegmentationResult(original_shape=(self.tile_size, self.tile_size))
+                    tile_res.hair_fur_mask = (mask_tile == self.CLASS_TO_IDX['hair_fur']).astype(np.uint8)
+                    self._update_stats(tile_res, mask_tile)
+                    tile_count += 1
+                    
+            return str(self.images_dir / (image_path.stem + "_tile_0_0.png")) # Just return first tile as ref
+        else:
+            # Save original (non-tiled)
+            # Save HR image
+            Image.fromarray(image_np).save(output_image_path)
+            
+            # Create and save LR image
+            lr_h, lr_w = h // self.scale, w // self.scale
+            lr_img = cv2.resize(image_np, (lr_w, lr_h), interpolation=cv2.INTER_CUBIC)
+            Image.fromarray(lr_img).save(output_lr_path)
+            
+            # Save mask
+            mask_img = Image.fromarray(mask)
+            mask_img.save(output_mask_path)
+            
+            # Update statistics
+            self._update_stats(result, mask)
+            
+            return str(output_image_path)
     
     def _create_output_mask(
         self,

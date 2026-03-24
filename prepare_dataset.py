@@ -24,6 +24,8 @@ def parse_args():
     parser.add_argument('--recursive', action='store_true', help='Search for images recursively')
     parser.add_argument('--max_images', type=int, default=None, help='Maximum number of images to process')
     parser.add_argument('--split_ratio', type=float, default=0.8, help='Training set ratio for the split')
+    parser.add_argument('--tile', type=int, default=None, help='Tile HR image into specified size (e.g. 512)')
+    parser.add_argument('--step', type=int, default=None, help='Stride for tiling (defaults to tile size)')
     
     return parser.parse_args()
 
@@ -44,7 +46,9 @@ def main():
     generator = DatasetGenerator(
         pipeline=pipeline,
         output_dir=args.output_dir,
-        scale=args.scale
+        scale=args.scale,
+        tile_size=args.tile,
+        step=args.step
     )
     
     # Process the directory

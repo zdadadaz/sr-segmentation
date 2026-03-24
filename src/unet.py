@@ -77,9 +77,16 @@ class UNetSR(nn.Module):
         self.conv_last = nn.Conv2d(F_, num_out_ch * scale ** 2, 3, padding=1)
         self.depth_to_space = nn.PixelShuffle(scale)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # anchor uses only the first num_out_ch channels (RGB), ignoring mask channel
-        xup = self.anchor(x[:, :self.num_out_ch])
+    def forward(self, x: torch.Tensor, seg_map=None) -> torch.Tensor:
+        if seg_map is not None and x.shape[1] == 3:
+            # Mask-concat mode internal handling
+            m = seg_map if seg_map.ndim == 4 else seg_map.unsqueeze(1)
+            if m.shape[2:] != x.shape[2:]:
+                m = F.interpolate(m, size=x.shape[2:], mode='nearest')
+            x = torch.cat([x, m.float()], dim=1)
+
+        # anchor uses only the first 3 channels (RGB)
+        xup = self.anchor(x[:, :3])
 
         # Encoder
         x1 = self.conv_first(x)

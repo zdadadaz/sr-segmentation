@@ -29,16 +29,6 @@ def build_model(arch: str, model_type: str, scale: int, device: str):
             return SegGuidedRRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale, num_seg_classes=2).to(device)
 
 
-def forward_model(model, lr_img, mask, model_type):
-    """Run generator forward pass, handling mask-concat vs SFT."""
-    if model_type == 'mask_concat':
-        mask_ch = mask if mask.ndim == 4 else mask.unsqueeze(1)
-        mask_ch = mask_ch.float()
-        if mask_ch.shape[2:] != lr_img.shape[2:]:
-            mask_ch = torch.nn.functional.interpolate(mask_ch, size=lr_img.shape[2:], mode='nearest')
-        return model(torch.cat([lr_img, mask_ch], dim=1))
-    else:
-        return model(lr_img, seg_map=mask)
 
 
 def _apply_config(args, cfg):
@@ -191,7 +181,7 @@ def run_validation(model, args, epoch, name_prefix=""):
             mask_tensor = torch.zeros((1, 1, lr_pil.height * args.scale, lr_pil.width * args.scale), device=device)
             
         # Inference
-        sr_tensor = forward_model(model, lr_tensor, mask_tensor, args.model_type)
+        sr_tensor = model(lr_tensor, mask_tensor)
         
         # Save
         sr_pil = TF.to_pil_image(sr_tensor.squeeze(0).clamp(0, 1))
@@ -245,7 +235,7 @@ def main():
             mask   = batch['mask'].to(args.device)
 
             optimizer.zero_grad()
-            sr_out = forward_model(model, lr_img, mask, args.model_type)
+            sr_out = model(lr_img, mask)
             loss = criterion(sr_out, hr_img, mask)
             loss.backward()
             optimizer.step()

@@ -13,7 +13,7 @@ from PIL import Image
 from tqdm import tqdm
 import torchvision.transforms.functional as TF
 
-from train import build_model, forward_model
+from train import build_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Inference for Seg-Guided SR')
@@ -114,7 +114,7 @@ def main():
         # they handle it.
         
         try:
-            sr_tensor = forward_model(model, img_tensor, mask_tensor, args.model_type)
+            sr_tensor = model(img_tensor, mask_tensor)
             
             # 4. Save result
             sr_image = TF.to_pil_image(sr_tensor.squeeze(0).clamp(0, 1))

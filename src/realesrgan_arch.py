@@ -82,7 +82,14 @@ class RRDBNet(nn.Module):
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
-    def forward(self, x):
+    def forward(self, x, seg_map=None):
+        if seg_map is not None and x.shape[1] == 3:
+            # Mask-concat mode internal handling
+            m = seg_map if seg_map.ndim == 4 else seg_map.unsqueeze(1)
+            if m.shape[2:] != x.shape[2:]:
+                m = F.interpolate(m, size=x.shape[2:], mode='nearest')
+            x = torch.cat([x, m.float()], dim=1)
+
         feat = self.conv_first(x)
         body_feat = self.conv_body(self.body(feat))
         feat = feat + body_feat
