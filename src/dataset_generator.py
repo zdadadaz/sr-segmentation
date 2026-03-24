@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image
 import cv2
 from tqdm import tqdm
+import traceback
 
 
 class DatasetGenerator:
@@ -73,6 +74,7 @@ class DatasetGenerator:
     def process_directory(
         self,
         source_dir: str,
+        mask_dir: str = None,
         extensions: List[str] = None,
         recursive: bool = True,
         max_images: int = None
@@ -82,6 +84,7 @@ class DatasetGenerator:
         
         Args:
             source_dir: Source directory containing images
+            mask_dir: Optional directory containing matching masks
             extensions: List of file extensions to process
             recursive: Whether to search recursively
             max_images: Maximum number of images to process
@@ -91,6 +94,7 @@ class DatasetGenerator:
         """
         extensions = extensions or ['.jpg', '.jpeg', '.png', '.webp']
         source_dir = Path(source_dir)
+        mask_dir = Path(mask_dir) if mask_dir else None
         
         # Find all images
         image_paths = []
@@ -108,23 +112,36 @@ class DatasetGenerator:
         
         for img_path in tqdm(image_paths, desc="Generating dataset"):
             try:
-                result = self.process_image(img_path)
+                # Look for matching mask if mask_dir is provided
+                provided_mask_path = None
+                if mask_dir:
+                    # Common mask extensions
+                    for m_ext in ['.png', '.jpg', '.jpeg', '.tif', '.bmp']:
+                        m_path = mask_dir / (img_path.stem + m_ext)
+                        if m_path.exists():
+                            provided_mask_path = m_path
+                            break
+                
+                result = self.process_image(img_path, provided_mask_path=provided_mask_path)
                 if result:
                     processed.append(result)
             except Exception as e:
                 print(f"Error processing {img_path}: {e}")
+                traceback.print_exc()
         
         return processed
     
     def process_image(
         self,
-        image_path: str
+        image_path: str,
+        provided_mask_path: Optional[str] = None
     ) -> Optional[str]:
         """
         Process a single image to create HR, LR, and Mask
         
         Args:
             image_path: Path to input image
+            provided_mask_path: Optional path to provided mask
             
         Returns:
             Output image path or None if failed
@@ -145,14 +162,42 @@ class DatasetGenerator:
             image_np = cv2.resize(image_np, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
             h, w = new_h, new_w
         
-        # Run segmentation
-        result = self.pipeline.segment(image_np)
-        
         # Generate output filename
         output_name = image_path.stem + '.png'
         output_image_path = self.images_dir / output_name
         output_lr_path = self.lr_dir / output_name
         output_mask_path = self.masks_dir / output_name
+
+        from src.pipeline import SegmentationResult
+        
+        if provided_mask_path:
+            # Load provided mask
+            provided_mask = Image.open(provided_mask_path)
+            # Convert to grayscale if necessary
+            if provided_mask.mode != 'L' and provided_mask.mode != 'P':
+                provided_mask = provided_mask.convert('L')
+            
+            mask_np = np.array(provided_mask)
+            
+            # Resize if needed
+            if mask_np.shape[:2] != (h, w):
+                mask_np = cv2.resize(mask_np, (w, h), interpolation=cv2.INTER_NEAREST)
+            
+            # If it's a binary mask (0/255), map to hair_fur class
+            if mask_np.max() > self.CLASS_TO_IDX['vegetation']:
+                mask = np.zeros((h, w), dtype=np.uint8)
+                mask[mask_np > 127] = self.CLASS_TO_IDX['hair_fur']
+            else:
+                mask = mask_np.astype(np.uint8)
+            
+            # Create a dummy result for statistics
+            result = SegmentationResult(original_shape=(h, w))
+            result.hair_fur_mask = (mask == self.CLASS_TO_IDX['hair_fur']).astype(np.uint8)
+        else:
+            # Run segmentation
+            result = self.pipeline.segment(image_np)
+            # Create mask from result
+            mask = self._create_output_mask(result, (h, w))
         
         # Save HR image
         Image.fromarray(image_np).save(output_image_path)
@@ -162,8 +207,7 @@ class DatasetGenerator:
         lr_img = cv2.resize(image_np, (lr_w, lr_h), interpolation=cv2.INTER_CUBIC)
         Image.fromarray(lr_img).save(output_lr_path)
         
-        # Create and save mask
-        mask = self._create_output_mask(result, (h, w))
+        # Save mask
         mask_img = Image.fromarray(mask)
         mask_img.save(output_mask_path)
         

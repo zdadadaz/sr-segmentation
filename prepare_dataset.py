@@ -18,6 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Prepare SR-Segmentation Dataset')
     parser.add_argument('--src_dir', type=str, required=True, help='Path to source HR images')
     parser.add_argument('--output_dir', type=str, default='data/custom_dataset', help='Output dataset directory')
+    parser.add_argument('--mask_dir', type=str, default=None, help='Path to matching masks (if provided, skips segmentation)')
     parser.add_argument('--config', type=str, default='configs/default.yaml', help='Path to config file')
     parser.add_argument('--scale', type=int, default=4, help='Downsampling scale')
     parser.add_argument('--recursive', action='store_true', help='Search for images recursively')
@@ -31,6 +32,8 @@ def main():
     
     print(f"🚀 Initializing preparation pipeline...")
     print(f"  Source: {args.src_dir}")
+    if args.mask_dir:
+        print(f"  Masks:  {args.mask_dir}")
     print(f"  Output: {args.output_dir}")
     print(f"  Scale: x{args.scale}")
     
@@ -48,6 +51,7 @@ def main():
     print(f"\n🔍 Searching for images in {args.src_dir}...")
     processed_files = generator.process_directory(
         source_dir=args.src_dir,
+        mask_dir=args.mask_dir,
         recursive=args.recursive,
         max_images=args.max_images
     )

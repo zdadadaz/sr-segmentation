@@ -25,7 +25,7 @@ sam:
 # SpeciesNet settings
 speciesnet:
   confidence_threshold: 0.5
-  use_classifier: false  # true: filter non-mammal animals via EfficientNet V2 classifier (slower)
+  use_classifier: true   # true: filter non-mammal animals via EfficientNet V2 classifier (slower)
 
 # Face parser selection: 'bisenet' or 'facexformer'
 face_parser: bisenet

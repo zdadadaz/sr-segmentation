@@ -196,8 +196,8 @@ def test_image(pipeline, img_path: Path, output_dir: Path):
 
 
 def main():
-    test_dir = Path(__file__).parent / 'data' / 'test'
-    output_dir = Path(__file__).parent / 'output' / 'data_test_results'
+    test_dir = Path(__file__).parent / 'data' / 'test2'
+    output_dir = Path(__file__).parent / 'output' / 'data_test2_results'
 
     exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
     images = sorted(p for p in test_dir.iterdir() if p.suffix.lower() in exts)

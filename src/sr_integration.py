@@ -311,7 +311,8 @@ class SegAwareLoss(nn.Module):
         hair_weight: float = 1.0,
         other_weight: float = 1.0,
         use_perceptual: bool = True,
-        use_ssim: bool = True
+        use_ssim: bool = True,
+        loss_type: str = 'l1'
     ):
         """
         Initialize seg-aware loss
@@ -321,6 +322,7 @@ class SegAwareLoss(nn.Module):
             other_weight: Weight for other region loss
             use_perceptual: Include perceptual loss
             use_ssim: Include SSIM loss
+            loss_type: 'l1' or 'l2' (MSE)
         """
         super().__init__()
         
@@ -328,9 +330,13 @@ class SegAwareLoss(nn.Module):
         self.other_weight = other_weight
         self.use_perceptual = use_perceptual
         self.use_ssim = use_ssim
+        self.loss_type = loss_type.lower()
         
-        # L1 loss
-        self.l1_loss = nn.L1Loss()
+        # Pixel loss
+        if self.loss_type == 'l2':
+            self.pixel_loss = nn.MSELoss()
+        else:
+            self.pixel_loss = nn.L1Loss()
         
         if use_perceptual:
             # VGG-based perceptual loss
@@ -374,13 +380,13 @@ class SegAwareLoss(nn.Module):
         hair_mask = (seg_map > 0.5).float()
         other_mask = 1 - hair_mask
         
-        # L1 loss
-        loss_hair_l1 = self.l1_loss(sr_output * hair_mask, hr_target * hair_mask)
-        loss_other_l1 = self.l1_loss(sr_output * other_mask, hr_target * other_mask)
+        # Pixel loss
+        loss_hair = self.pixel_loss(sr_output * hair_mask, hr_target * hair_mask)
+        loss_other = self.pixel_loss(sr_output * other_mask, hr_target * other_mask)
         
         loss = (
-            self.hair_weight * loss_hair_l1 +
-            self.other_weight * loss_other_l1
+            self.hair_weight * loss_hair +
+            self.other_weight * loss_other
         )
         
         # Perceptual loss

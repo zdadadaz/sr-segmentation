@@ -146,8 +146,10 @@ soft_mask = result.get_soft_mask(3.0)  # Gaussian-blurred for SR blending
 
 ```bash
 # Auto-label real images
+# Use --mask_dir to provide existing masks and skip automatic segmentation
 python prepare_dataset.py \
   --src_dir path/to/hr_images \
+  --mask_dir path/to/masks \
   --output_dir data/my_dataset \
   --scale 4
 
@@ -215,6 +217,7 @@ python train.py --config configs/train.yaml \
 | `--save_dir` | `train.save_dir` | `experiments` | Checkpoint directory |
 | `--device` | `train.device` | `auto` | `cuda` / `cpu` / `auto` |
 | `--hair_weight` | `loss.hair_weight` | 2.0 | Loss weight for hair/fur regions |
+| `--pixel_loss_type`| `loss.pixel_loss_type`| `l1`| `l1` (MAE) or `l2` (MSE) |
 | `--no_perceptual` | `loss.use_perceptual` | — | Disable perceptual loss |
 | `--no_ssim` | `loss.use_ssim` | — | Disable SSIM loss |
 
@@ -225,8 +228,12 @@ python train.py --config configs/train.yaml \
 Real-ESRGAN-style adversarial training. Typically used to fine-tune a pretrained generator.
 
 **Losses:**
-- **Generator**: `w_pixel` × SegAwareLoss(L1) + `w_perceptual` × VGG perceptual + `w_adv` × LSGAN
-- **Discriminator**: LSGAN (MSE, real=1 / fake=0) — more stable than standard BCE
+- **Generator**: `w_pixel` × SegAwareLoss(`pixel_loss_type`) + `w_perceptual` × Multi-layer VGG19 + `w_adv` × GAN
+- **Discriminator**: Adversarial loss (L1 or L2/LSGAN)
+- **Stability**: Supports **EMA** (Exponential Moving Average) for generator weights.
+
+**Perceptual Loss (VGG19 layers & weights):**
+- conv1_2 (0.1), conv2_2 (0.1), conv3_4 (1.0), conv4_4 (1.0), conv5_4 (1.0)
 
 ```bash
 # Step 1: pretrain generator with pixel loss
@@ -248,10 +255,12 @@ python train_gan.py --config configs/train.yaml \
 | `--w_pixel` | `gan.w_pixel` | 1.0 | SegAwareLoss weight |
 | `--w_perceptual` | `gan.w_perceptual` | 0.1 | VGG perceptual loss weight |
 | `--w_adv` | `gan.w_adv` | 0.01 | Adversarial loss weight |
+| `--gan_loss_type` | `gan.gan_loss_type` | `l1` | `l1` or `l2` (LSGAN) |
+| `--ema_decay` | `gan.ema_decay` | 0.999 | Generator EMA decay (0 to disable) |
 | `--d_feat` | `gan.d_feat` | 64 | Discriminator base channels |
 | `--save_every` | `gan.save_every` | 5 | Save checkpoint every N epochs |
 
-Checkpoints are saved as `epoch_N_G.pth` and `epoch_N_D.pth` separately.
+Checkpoints are saved as `epoch_N_G.pth`, `epoch_N_D.pth`, and `epoch_N_G_ema.pth`.
 
 ---
 
@@ -269,3 +278,5 @@ Checkpoints are saved as `epoch_N_G.pth` and `epoch_N_D.pth` separately.
 - [x] PR10: `mask_concat` training mode (RRDBNet 4-ch input, no SFT)
 - [x] PR11: UNetSR + SegGuidedUNetSR architectures; VGGDiscriminator; GAN training (`train_gan.py`)
 - [x] PR12: `configs/train.yaml` — unified training config; `--config` flag for both training scripts
+- [x] PR13: EMA support for Generator fine-tuning; Multi-layer VGG19 Perpetual loss
+- [x] PR14: Configurable pixel & GAN loss types (L1/L2) via training config; `prepare_dataset --mask_dir` support

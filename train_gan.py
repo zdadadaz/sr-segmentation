@@ -32,21 +32,51 @@ from train import build_model, forward_model
 # ---------------------------------------------------------------------------
 
 class PerceptualLoss(nn.Module):
-    """L1 loss on VGG16 relu4_3 feature maps."""
+    """L1 loss on multiple VGG19 feature maps."""
 
-    def __init__(self):
+    def __init__(self, device):
         super().__init__()
-        from torchvision.models import vgg16, VGG16_Weights
-        vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
-        self.features = vgg.features[:23]   # up to relu4_3
+        from torchvision.models import vgg19, VGG19_Weights
+        vgg = vgg19(weights=VGG19_Weights.IMAGENET1K_V1)
+        
+        # Layer indices for VGG19 (ReLU outputs):
+        # conv1_2: index 3, weight 0.1
+        # conv2_2: index 8, weight 0.1
+        # conv3_4: index 17, weight 1.0
+        # conv4_4: index 26, weight 1.0
+        # conv5_4: index 35, weight 1.0
+        self.layer_weights = {
+            '3': 0.1, '8': 0.1, '17': 1.0, '26': 1.0, '35': 1.0
+        }
+        
+        self.features = vgg.features[:36].to(device)
         for p in self.features.parameters():
             p.requires_grad = False
         self.features.eval()
 
     def forward(self, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
-        sr_feat = self.features(torch.clamp(sr, 0, 1))
-        hr_feat = self.features(torch.clamp(hr, 0, 1))
-        return nn.functional.l1_loss(sr_feat, hr_feat)
+        # Input images are expected to be in [0, 1] range; clamp just in case.
+        x_sr = torch.clamp(sr, 0, 1)
+        x_hr = torch.clamp(hr, 0, 1)
+        
+        loss = 0
+        for name, module in self.features._modules.items():
+            x_sr = module(x_sr)
+            x_hr = module(x_hr)
+            if name in self.layer_weights:
+                loss += self.layer_weights[name] * nn.functional.l1_loss(x_sr, x_hr)
+        return loss
+
+
+def update_ema(netG_ema, netG, decay):
+    """
+    Update EMA model: netG_ema = netG_ema * decay + netG * (1 - decay)
+    """
+    with torch.no_grad():
+        msd = netG.state_dict()
+        emsd = netG_ema.state_dict()
+        for key in msd:
+            emsd[key].copy_(emsd[key] * decay + (1.0 - decay) * msd[key])
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +113,7 @@ def _apply_config(args, cfg):
     # Loss (shared with train.py)
     if args.hair_weight  is None: args.hair_weight  = loss_cfg.get('hair_weight',  2.0)
     if args.other_weight is None: args.other_weight = loss_cfg.get('other_weight', 1.0)
+    if args.pixel_loss_type is None: args.pixel_loss_type = loss_cfg.get('pixel_loss_type', 'l1')
 
     # GAN-specific
     if args.pretrained_g  is None: args.pretrained_g  = gan_cfg.get('pretrained_g')
@@ -93,6 +124,8 @@ def _apply_config(args, cfg):
     if args.w_adv         is None: args.w_adv         = gan_cfg.get('w_adv',        0.01)
     if args.d_feat        is None: args.d_feat        = gan_cfg.get('d_feat',       64)
     if args.save_every    is None: args.save_every    = gan_cfg.get('save_every',   5)
+    if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
+    if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'l2')
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +160,7 @@ def parse_args():
     # Loss weights
     parser.add_argument('--hair_weight',  type=float, default=None, help='SegAwareLoss hair weight')
     parser.add_argument('--other_weight', type=float, default=None, help='SegAwareLoss non-hair weight')
+    parser.add_argument('--pixel_loss_type', type=str, default=None, choices=['l1', 'l2'], help='Pixel loss: l1 | l2')
 
     # GAN-specific
     parser.add_argument('--pretrained_g', type=str,   default=None, help='Pretrained generator checkpoint')
@@ -137,6 +171,8 @@ def parse_args():
     parser.add_argument('--w_adv',        type=float, default=None, help='Adversarial loss weight (G)')
     parser.add_argument('--d_feat',       type=int,   default=None, help='Discriminator base channels')
     parser.add_argument('--save_every',   type=int,   default=None, help='Save checkpoint every N epochs')
+    parser.add_argument('--ema_decay',    type=float, default=None, help='Generator EMA decay')
+    parser.add_argument('--gan_loss_type', type=str,  default=None, choices=['l1', 'l2'], help='GAN loss: l1 | l2')
 
     args = parser.parse_args()
 
@@ -189,6 +225,13 @@ def main():
         netG.load_state_dict(ckpt['model_state_dict'])
         print(f"Loaded pretrained G from {args.pretrained_g}")
 
+    # ---- EMA Generator -----------------------------------------------------
+    netG_ema = build_model(args.arch, args.model_type, args.scale, device).to(device)
+    netG_ema.load_state_dict(netG.state_dict())
+    netG_ema.eval()
+    for p_ema in netG_ema.parameters():
+        p_ema.requires_grad = False
+
     # ---- Discriminator -----------------------------------------------------
     print("Initializing Discriminator...")
     netD = VGGDiscriminator(num_in_ch=3, num_feat=args.d_feat).to(device)
@@ -199,12 +242,16 @@ def main():
         other_weight=args.other_weight,
         use_perceptual=False,   # perceptual handled separately below
         use_ssim=False,
+        loss_type=args.pixel_loss_type,
     ).to(device)
 
-    criterion_perceptual = PerceptualLoss().to(device)
+    criterion_perceptual = PerceptualLoss(device).to(device)
 
-    # LSGAN: real target=1, fake target=0
-    criterion_gan = nn.MSELoss()
+    # Adverarial loss: l1 or l2
+    if args.gan_loss_type == 'l1':
+        criterion_gan = nn.L1Loss()
+    else:
+        criterion_gan = nn.MSELoss()
 
     # ---- Optimizers --------------------------------------------------------
     optG = optim.Adam(netG.parameters(), lr=args.lr_g, betas=(0.9, 0.99))
@@ -266,6 +313,10 @@ def main():
             loss_g.backward()
             optG.step()
 
+            # Update EMA
+            if args.ema_decay > 0:
+                update_ema(netG_ema, netG, args.ema_decay)
+
             # ----------------------------------------------------------------
             totals['g']     += loss_g.item()
             totals['g_pix'] += loss_pix.item()
@@ -300,7 +351,14 @@ def main():
                 'model_state_dict': netD.state_dict(),
                 'optimizer_state_dict': optD.state_dict(),
             }, base + '_D.pth')
-            print(f"Saved: {base}_G.pth  /  {base}_D.pth")
+            
+            # Save EMA
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': netG_ema.state_dict(),
+            }, base + '_G_ema.pth')
+            
+            print(f"Saved: {base}_G.pth  /  {base}_D.pth  /  {base}_G_ema.pth")
 
 
 if __name__ == '__main__':

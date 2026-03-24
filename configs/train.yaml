@@ -31,23 +31,26 @@ train:
   device: auto       # auto (detect cuda) | cuda | cpu
 
 # ---------------------------------------------------------------------------
-# Loss settings  (train.py)
+# Loss settings  (train.py & train_gan.py pixel-wise loss)
 # ---------------------------------------------------------------------------
 loss:
-  hair_weight: 2.0
-  other_weight: 1.0
-  use_perceptual: true
-  use_ssim: true
+  hair_weight: 2.0      # Weight multiplier for hair/fur regions
+  other_weight: 1.0     # Weight multiplier for non-hair regions
+  use_perceptual: true  # Use VGG feature loss
+  use_ssim: true        # Use Structural Similarity loss
+  pixel_loss_type: l1   # Base pixel loss: l1 (Mean Absolute Error) | l2 (Mean Squared Error)
 
 # ---------------------------------------------------------------------------
-# GAN settings  (train_gan.py only)
+# GAN settings  (train_gan.py fine-tuning)
 # ---------------------------------------------------------------------------
 gan:
-  pretrained_g: ~      # path to pretrained generator checkpoint from train.py
+  pretrained_g: ~      # Path to warm-start generator (e.g. from train.py)
   lr_g: 1.0e-4
   lr_d: 1.0e-4
-  w_pixel: 1.0         # SegAwareLoss (L1) weight
-  w_perceptual: 0.1    # VGG perceptual loss weight
-  w_adv: 0.01          # adversarial loss weight (generator)
-  d_feat: 64           # discriminator base channels
-  save_every: 5        # save checkpoint every N epochs
+  w_pixel: 1.0         # SegAwareLoss (pixel) weight
+  w_perceptual: 0.1    # Multi-layer VGG19 perceptual loss weight
+  w_adv: 0.01          # Adversarial loss weight (Generator side)
+  gan_loss_type: l1    # Adversarial loss type: l1 | l2 (LSGAN typically uses l2/mse)
+  d_feat: 64           # Discriminator base channels
+  save_every: 5        # Save checkpoint every N epochs
+  ema_decay: 0.999     # Exponential Moving Average decay for Generator weights (0 to disable)

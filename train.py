@@ -71,6 +71,7 @@ def _apply_config(args, cfg):
     # Loss
     if args.hair_weight  is None: args.hair_weight  = loss_cfg.get('hair_weight',  2.0)
     if args.other_weight is None: args.other_weight = loss_cfg.get('other_weight', 1.0)
+    if args.pixel_loss_type is None: args.pixel_loss_type = loss_cfg.get('pixel_loss_type', 'l1')
 
     # Bool flags: --no_perceptual / --no_ssim default to False (not set).
     # If not explicitly passed on CLI, read from config.
@@ -111,6 +112,8 @@ def parse_args():
     parser.add_argument('--other_weight', type=float, default=None, help='Weight for non-hair regions')
     parser.add_argument('--no_perceptual', action='store_true', help='Disable perceptual loss')
     parser.add_argument('--no_ssim',       action='store_true', help='Disable SSIM loss')
+    parser.add_argument('--pixel_loss_type', type=str, default=None, choices=['l1', 'l2'], 
+                        help='Pixel loss type: l1 | l2 (mse)')
 
     args = parser.parse_args()
 
@@ -158,6 +161,7 @@ def main():
         other_weight=args.other_weight,
         use_perceptual=not args.no_perceptual,
         use_ssim=not args.no_ssim,
+        loss_type=args.pixel_loss_type,
     ).to(args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
