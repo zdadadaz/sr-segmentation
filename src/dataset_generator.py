@@ -165,21 +165,8 @@ class DatasetGenerator:
             image = image.convert('RGB')
         image_np = np.array(image)
         
-        # Ensure image is divisible by scale (for clean downsampling)
+        # Keep original dimensions
         h, w = image_np.shape[:2]
-        
-        # If tiling is active, ensure image is at least tile_size
-        target_h, target_w = h, w
-        if self.tile_size:
-            target_h = max(h, self.tile_size)
-            target_w = max(w, self.tile_size)
-            
-        new_h = (target_h // self.scale) * self.scale
-        new_w = (target_w // self.scale) * self.scale
-        
-        if new_h != h or new_w != w:
-            image_np = cv2.resize(image_np, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-            h, w = new_h, new_w
         
         # Generate output filename
         output_name = image_path.stem + '.png'

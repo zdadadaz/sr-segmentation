@@ -365,16 +365,16 @@ class SegAwareLoss(nn.Module):
         Returns:
             Combined loss
         """
-        # Prepare seg_map
+        # 1. Handle potential size mismatch due to scale rounding
+        if sr_output.shape[2:] != hr_target.shape[2:]:
+            h_h, w_h = sr_output.shape[2:]
+            hr_target = hr_target[:, :, :h_h, :w_h]
+            if seg_map.shape[2:] != (h_h, w_h):
+                seg_map = F.interpolate(seg_map, size=(h_h, w_h), mode='nearest')
+
+        # 2. Prepare seg_map
         if seg_map.ndim == 3:
             seg_map = seg_map.unsqueeze(1)
-        
-        # Resize to match if needed
-        if seg_map.shape[2:] != sr_output.shape[2:]:
-            seg_map = F.interpolate(
-                seg_map, size=sr_output.shape[2:],
-                mode='bilinear', align_corners=False
-            )
         
         # Binary mask
         hair_mask = (seg_map > 0.5).float()
