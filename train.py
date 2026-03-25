@@ -143,14 +143,13 @@ def run_validation(model, args, epoch, name_prefix=""):
     from PIL import Image
     import torchvision.transforms.functional as TF
 
-    if not args.val_enabled or not args.val_lr_dir or not args.val_mask_dir:
+    if not args.val_enabled or not args.val_lr_dir:
         return
 
     val_out_dir = os.path.join(args.save_dir, 'validation', f'epoch_{epoch}')
     os.makedirs(val_out_dir, exist_ok=True)
     
     val_lr_path = Path(args.val_lr_dir)
-    val_mask_path = Path(args.val_mask_dir)
     exts = ['.png', '.jpg', '.jpeg', '.webp']
     images = sorted([p for p in val_lr_path.glob('*') if p.suffix.lower() in exts])
     
