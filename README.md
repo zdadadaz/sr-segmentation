@@ -146,18 +146,44 @@ soft_mask = result.get_soft_mask(3.0)  # Gaussian-blurred for SR blending
 
 ```bash
 # Auto-label real images
-# Use --mask_dir to provide existing masks and skip automatic segmentation
 python prepare_dataset.py \
   --src_dir path/to/hr_images \
-  --mask_dir path/to/masks \
   --output_dir data/my_dataset \
-  --scale 4
+  --scale 4 \
+  --tile 512 --step 256  # Optional: tile large images for training
 
-# Quick smoke test with synthetic data
-python generate_dummy_data.py
+# Prepare data for segmentation training ONLY (no LR generated)
+python prepare_dataset.py \
+  --src_dir path/to/raw_images \
+  --output_dir data/seg_train \
+  --skip_lr
 ```
 
-Produces `hr/`, `lr/`, and `mask/` subdirectories plus a `split.json`.
+| Argument | Description |
+|----------|-------------|
+| `--src_dir` | Input HR/Original images |
+| `--mask_dir` | (Optional) Provide manual masks to skip auto-labeling |
+| `--tile` | Divide images into fixed-size tiles (e.g. 512) |
+| `--step` | Stride for tiling (e.g. 256 for 50% overlap) |
+| `--skip_lr` | Do not generate LR images (for segmentation-only tasks) |
+| `--scale` | Super-resolution scale factor (ignored if `skip_lr` is set) |
+
+Produces `hr/`, `lr/` (unless skipped), and `mask/` subdirectories plus a `split.json`.
+
+---
+
+## Segmentation Model Training (`train_segment.py`)
+
+Train the standalone hair/fur segmentation model (DeepLabV3 + MobileNetV3).
+
+```bash
+python train_segment.py \
+  --images_dir data/seg_train/hr \
+  --masks_dir data/seg_train/mask \
+  --val_images_dir data/seg_val/hr \
+  --val_masks_dir data/seg_val/mask \
+  --epochs 20 --batch_size 8
+```
 
 ---
 
@@ -308,6 +334,9 @@ validation:
 | `--val_lr_dir` | Path to validation LR images |
 | `--val_mask_dir` | Path to validation masks |
 
+**For `train_segment.py`:**
+- Use `--val_images_dir` and `--val_masks_dir` to enable validation loss and sample qualitative results saving.
+
 ---
 
 ## PR Progress
@@ -327,4 +356,7 @@ validation:
 - [x] PR13: EMA support for Generator fine-tuning; Multi-layer VGG19 Perpetual loss
 - [x] PR14: Configurable pixel & GAN loss types (L1/L2) via training config; `prepare_dataset --mask_dir` support
 - [x] PR15: Dedicated `inference.py` script for batch processing with external masks
-- [x] PR16: Validation mechanism in `train.py` and `train_gan.py`; save progress images during training
+- [x] PR16: Validation mechanism in `train.py` and `train_gan.py`
+- [x] PR17: Tiling and step support in `prepare_dataset.py` for large image slicing
+- [x] PR18: Unified model interface (`model(x, mask)`) for all SR architectures
+- [x] PR19: Segmentation-only dataset preparation (`--skip_lr`) and `train_segment.py` validation support

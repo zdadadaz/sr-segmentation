@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument('--split_ratio', type=float, default=0.8, help='Training set ratio for the split')
     parser.add_argument('--tile', type=int, default=None, help='Tile HR image into specified size (e.g. 512)')
     parser.add_argument('--step', type=int, default=None, help='Stride for tiling (defaults to tile size)')
+    parser.add_argument('--skip_lr', action='store_true', help='Skip LR image generation (useful for segmentation training sets)')
     
     return parser.parse_args()
 
@@ -37,7 +38,10 @@ def main():
     if args.mask_dir:
         print(f"  Masks:  {args.mask_dir}")
     print(f"  Output: {args.output_dir}")
-    print(f"  Scale: x{args.scale}")
+    if not args.skip_lr:
+        print(f"  Scale: x{args.scale}")
+    else:
+        print(f"  Mode:   Segmentation data only (skip LR)")
     
     # Initialize segmentation pipeline
     pipeline = SegmentationPipeline(config_path=args.config)
@@ -48,7 +52,8 @@ def main():
         output_dir=args.output_dir,
         scale=args.scale,
         tile_size=args.tile,
-        step=args.step
+        step=args.step,
+        skip_lr=args.skip_lr
     )
     
     # Process the directory
@@ -77,7 +82,8 @@ def main():
     
     print(f"\n✨ Dataset preparation complete!")
     print(f"  HR images: {os.path.join(args.output_dir, 'hr')}")
-    print(f"  LR images: {os.path.join(args.output_dir, 'lr')}")
+    if not args.skip_lr:
+        print(f"  LR images: {os.path.join(args.output_dir, 'lr')}")
     print(f"  Masks:     {os.path.join(args.output_dir, 'mask')}")
     print(f"\nYou can now use these directories to start training with train.py.")
 

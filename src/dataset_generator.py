@@ -38,7 +38,8 @@ class DatasetGenerator:
         masks_subdir: str = 'mask',
         scale: int = 4,
         tile_size: int = None,
-        step: int = None
+        step: int = None,
+        skip_lr: bool = False
     ):
         """
         Initialize dataset generator
@@ -52,6 +53,7 @@ class DatasetGenerator:
             scale: Downsampling scale for LR images
             tile_size: Size of HR tiles (if None, process full image)
             step: Stride for tiling (defaults to tile_size)
+            skip_lr: If True, do not generate LR images
         """
         self.pipeline = pipeline
         self.output_dir = Path(output_dir)
@@ -61,11 +63,14 @@ class DatasetGenerator:
         self.scale = scale
         self.tile_size = tile_size
         self.step = step or tile_size
+        self.skip_lr = skip_lr
         
         # Create directories
         self.images_dir.mkdir(parents=True, exist_ok=True)
-        self.lr_dir.mkdir(parents=True, exist_ok=True)
         self.masks_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not self.skip_lr:
+            self.lr_dir.mkdir(parents=True, exist_ok=True)
         
         # Statistics
         self.stats = {
@@ -241,9 +246,10 @@ class DatasetGenerator:
                     Image.fromarray(hr_tile).save(t_hr_path)
                     
                     # LR (downsample HR tile)
-                    lr_tile_h, lr_tile_w = self.tile_size // self.scale, self.tile_size // self.scale
-                    lr_tile = cv2.resize(hr_tile, (lr_tile_w, lr_tile_h), interpolation=cv2.INTER_CUBIC)
-                    Image.fromarray(lr_tile).save(t_lr_path)
+                    if not self.skip_lr:
+                        lr_tile_h, lr_tile_w = self.tile_size // self.scale, self.tile_size // self.scale
+                        lr_tile = cv2.resize(hr_tile, (lr_tile_w, lr_tile_h), interpolation=cv2.INTER_CUBIC)
+                        Image.fromarray(lr_tile).save(t_lr_path)
                     
                     # Mask
                     Image.fromarray(mask_tile).save(t_mask_path)
@@ -263,9 +269,10 @@ class DatasetGenerator:
             Image.fromarray(image_np).save(output_image_path)
             
             # Create and save LR image
-            lr_h, lr_w = h // self.scale, w // self.scale
-            lr_img = cv2.resize(image_np, (lr_w, lr_h), interpolation=cv2.INTER_CUBIC)
-            Image.fromarray(lr_img).save(output_lr_path)
+            if not self.skip_lr:
+                lr_h, lr_w = h // self.scale, w // self.scale
+                lr_img = cv2.resize(image_np, (lr_w, lr_h), interpolation=cv2.INTER_CUBIC)
+                Image.fromarray(lr_img).save(output_lr_path)
             
             # Save mask
             mask_img = Image.fromarray(mask)
