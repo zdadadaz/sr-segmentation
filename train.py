@@ -166,6 +166,7 @@ def run_validation(model, args, epoch, name_prefix=""):
         # Load LR
         lr_pil = Image.open(img_path).convert('RGB')
         lr_tensor = TF.to_tensor(lr_pil).unsqueeze(0).to(device)
+        h, w = lr_tensor.shape[2:] # input size
         
         # Load Mask
         mask_tensor = None
@@ -185,7 +186,6 @@ def run_validation(model, args, epoch, name_prefix=""):
             mask_tensor = torch.zeros((1, 1, h * args.scale, w * args.scale), device=device)
             
         # Pad to multiple of 4 (for UNet architectures)
-        h, w = lr_tensor.shape[2:]
         pad_h = (4 - h % 4) % 4
         pad_w = (4 - w % 4) % 4
         
