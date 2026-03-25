@@ -245,7 +245,7 @@ class DatasetGenerator:
                     # We create a simple result object for stats update
                     from src.pipeline import SegmentationResult
                     tile_res = SegmentationResult(original_shape=(self.tile_size, self.tile_size))
-                    tile_res.hair_fur_mask = (mask_tile == self.CLASS_TO_IDX['hair_fur']).astype(np.uint8)
+                    tile_res.hair_fur_mask = (mask_tile > 0).astype(np.uint8)
                     self._update_stats(tile_res, mask_tile)
                     tile_count += 1
                     
@@ -276,46 +276,28 @@ class DatasetGenerator:
         original_shape: Tuple[int, int]
     ) -> np.ndarray:
         """
-        Create output mask in standard format
-        
+        Create binary hair/fur mask (0 = background, 255 = hair/fur).
+
         Args:
             result: SegmentationResult
             original_shape: (H, W) of original image
-            
+
         Returns:
-            Class index mask (H, W)
+            Binary mask (H, W), dtype uint8, values 0 or 255
         """
         h, w = original_shape
-        
-        # Initialize with background (0)
-        mask = np.zeros((h, w), dtype=np.uint8)
-        
-        # Add vegetation (placeholder - would need vegetation detection)
-        
-        # Add skin (class 3)
-        if result.skin_mask is not None:
-            skin = cv2.resize(result.skin_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-            mask[skin > 0] = self.CLASS_TO_IDX['skin']
-        
-        # Add face (class 2)
-        if result.face_mask is not None:
-            face = cv2.resize(result.face_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-            mask[face > 0] = self.CLASS_TO_IDX['face']
-        
-        # Add hair/fur (class 1)
         final_mask = result.final_mask
-        if final_mask is not None:
-            final = cv2.resize(final_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-            mask[final > 0] = self.CLASS_TO_IDX['hair_fur']
-        
-        return mask
+        if final_mask is None:
+            return np.zeros((h, w), dtype=np.uint8)
+        resized = cv2.resize(final_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        return (resized > 0).astype(np.uint8) * 255
     
     def _update_stats(self, result, mask: np.ndarray):
         """Update running statistics"""
         self.stats['total_images'] += 1
-        
-        # Count hair/fur pixels
-        hair_pixels = np.sum(mask == self.CLASS_TO_IDX['hair_fur'])
+
+        # Count hair/fur pixels (mask is binary 0/255)
+        hair_pixels = np.sum(mask > 0)
         total_pixels = mask.size
         hair_coverage = hair_pixels / total_pixels
         
@@ -330,9 +312,9 @@ class DatasetGenerator:
         if result.human_hair_mask is not None and result.human_hair_mask.any():
             self.stats['images_with_human'] += 1
         
-        # Class distribution
-        for i, class_name in enumerate(self.CLASSES):
-            self.stats['class_distribution'][class_name] += np.sum(mask == i)
+        # Class distribution (binary mask: 0=background, >0=hair_fur)
+        self.stats['class_distribution']['hair_fur'] += hair_pixels
+        self.stats['class_distribution']['background'] += total_pixels - hair_pixels
     
     def generate_split(
         self,
