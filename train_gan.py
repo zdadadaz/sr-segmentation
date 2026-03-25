@@ -241,7 +241,7 @@ def main():
         print(f"Loaded pretrained G from {args.pretrained_g}")
 
     # ---- EMA Generator -----------------------------------------------------
-    netG_ema = build_model(args.arch, args.model_type, args.scale, device).to(device)
+    netG_ema = build_model(args.arch, args.model_type, args.scale, device, args.block_type).to(device)
     netG_ema.load_state_dict(netG.state_dict())
     netG_ema.eval()
     for p_ema in netG_ema.parameters():
