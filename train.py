@@ -15,18 +15,22 @@ from src.dataset import create_dataloader
 from src.sr_integration import SegAwareLoss
 
 
-def build_model(arch: str, model_type: str, scale: int, device: str):
-    """Instantiate generator based on arch and model_type."""
+def build_model(arch: str, model_type: str, scale: int, device: str, block_type: str = 'conv'):
+    """Instantiate generator based on arch, model_type, and block_type."""
     if arch == 'unet':
         if model_type == 'mask_concat':
-            return UNetSR(num_in_ch=4, num_out_ch=3, num_feat=64, scale=scale).to(device)
+            return UNetSR(num_in_ch=4, num_out_ch=3, num_feat=64, scale=scale,
+                          block_type=block_type).to(device)
         else:  # sft
-            return SegGuidedUNetSR(num_in_ch=3, num_out_ch=3, num_feat=64, scale=scale, num_seg_classes=2).to(device)
-    else:  # rrdb
+            return SegGuidedUNetSR(num_in_ch=3, num_out_ch=3, num_feat=64, scale=scale,
+                                   num_seg_classes=2, block_type=block_type).to(device)
+    else:  # rrdb (block_type not applicable)
         if model_type == 'mask_concat':
-            return RRDBNet(num_in_ch=4, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale).to(device)
+            return RRDBNet(num_in_ch=4, num_out_ch=3, num_feat=64, num_block=23,
+                           num_grow_ch=32, scale=scale).to(device)
         else:  # sft
-            return SegGuidedRRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale, num_seg_classes=2).to(device)
+            return SegGuidedRRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23,
+                                    num_grow_ch=32, scale=scale, num_seg_classes=2).to(device)
 
 
 
@@ -47,6 +51,7 @@ def _apply_config(args, cfg):
     if args.arch       is None: args.arch       = model_cfg.get('arch',       'rrdb')
     if args.model_type is None: args.model_type = model_cfg.get('model_type', 'sft')
     if args.scale      is None: args.scale      = model_cfg.get('scale',      4)
+    if args.block_type is None: args.block_type = model_cfg.get('block_type', 'conv')
 
     # Train
     if args.epochs     is None: args.epochs     = train_cfg.get('epochs',     10)
@@ -102,6 +107,8 @@ def parse_args():
                         help='Generator architecture')
     parser.add_argument('--model_type', type=str, default=None, choices=['sft', 'mask_concat'],
                         help='sft: SFT injection | mask_concat: 4-ch input')
+    parser.add_argument('--block_type', type=str, default=None, choices=['conv', 'clb'],
+                        help='conv: standard 3×3 (default) | clb: Collapsible Linear Block (SESR)')
 
     # Loss
     parser.add_argument('--hair_weight',  type=float, default=None, help='Weight for hair/fur regions')
@@ -230,7 +237,7 @@ def main():
     print(f"Dataset size: {len(train_loader.dataset)}")
 
     print(f"Initializing Model (arch={args.arch}, model_type={args.model_type})...")
-    model = build_model(args.arch, args.model_type, args.scale, args.device)
+    model = build_model(args.arch, args.model_type, args.scale, args.device, args.block_type)
 
     print("Initializing SegAwareLoss...")
     # If no mask_dir provided, we should probably use equal weights (standard loss)

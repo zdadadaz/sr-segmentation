@@ -18,6 +18,8 @@ model:
   model_type: sft    # sft | mask_concat
   scale: 4
   num_feat: 64
+  block_type: conv   # conv: standard 3×3 | clb: Collapsible Linear Block (SESR, unet only)
+                     # clb trains expand(3×3)→squeeze(1×1); call collapse_clb() before deploy
 
 # ---------------------------------------------------------------------------
 # Training hyperparameters

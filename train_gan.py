@@ -100,6 +100,7 @@ def _apply_config(args, cfg):
     if args.arch       is None: args.arch       = model_cfg.get('arch',       'unet')
     if args.model_type is None: args.model_type = model_cfg.get('model_type', 'sft')
     if args.scale      is None: args.scale      = model_cfg.get('scale',      4)
+    if args.block_type is None: args.block_type = model_cfg.get('block_type', 'conv')
 
     # Train
     if args.epochs     is None: args.epochs     = train_cfg.get('epochs',     50)
@@ -162,6 +163,8 @@ def parse_args():
                         help='Generator architecture')
     parser.add_argument('--model_type', type=str, default=None, choices=['sft', 'mask_concat'],
                         help='sft: SFT injection | mask_concat: 4-ch input')
+    parser.add_argument('--block_type', type=str, default=None, choices=['conv', 'clb'],
+                        help='conv: standard 3×3 (default) | clb: Collapsible Linear Block (SESR)')
 
     # Loss weights
     parser.add_argument('--hair_weight',  type=float, default=None, help='SegAwareLoss hair weight')
@@ -230,7 +233,7 @@ def main():
 
     # ---- Generator ---------------------------------------------------------
     print("Initializing Generator...")
-    netG = build_model(args.arch, args.model_type, args.scale, device)
+    netG = build_model(args.arch, args.model_type, args.scale, device, args.block_type)
 
     if args.pretrained_g:
         ckpt = torch.load(args.pretrained_g, map_location=device)

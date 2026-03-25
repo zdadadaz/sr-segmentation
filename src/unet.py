@@ -22,8 +22,128 @@ class Interpolate(nn.Module):
         return F.interpolate(x, scale_factor=self.scale_factor, mode=self.mode, **kwargs)
 
 
-def _conv(in_ch, out_ch):
-    """Conv2d 3×3 + LeakyReLU."""
+# ---------------------------------------------------------------------------
+# Collapsible Linear Block (CLB) — from SESR
+# "Collapsible Linear Blocks for Super-Efficient Super Resolution" (WACV 2022)
+# https://arxiv.org/abs/2103.09404
+#
+# Training:  expand(3×3, no bias) → squeeze(1×1, bias) → activation
+# Inference: mathematically equivalent single 3×3 conv → activation
+#            obtained by collapsing expand+squeeze into one kernel via the
+#            impulse-response trick (see collapse()).
+# ---------------------------------------------------------------------------
+
+class CollapsibleLinearBlock(nn.Module):
+    """
+    CLB (non-residual). Suitable when in_ch != out_ch (e.g. first conv).
+
+    Args:
+        in_ch:   input channels
+        out_ch:  output channels
+        tmp_ch:  intermediate channels (expand width). Default: out_ch * 4.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, tmp_ch: int = None):
+        super().__init__()
+        if tmp_ch is None:
+            tmp_ch = out_ch * 4
+        # bias=False on expand is REQUIRED for correct collapse math
+        self.conv_expand  = nn.Conv2d(in_ch,   tmp_ch,  3, padding=1, bias=False)
+        self.conv_squeeze = nn.Conv2d(tmp_ch,  out_ch,  1)
+        self.activation   = nn.LeakyReLU(0.2, inplace=True)
+        self.collapsed    = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.collapsed:
+            return self.activation(self.conv_expand(x))
+        return self.activation(self.conv_squeeze(self.conv_expand(x)))
+
+    def collapse(self):
+        """
+        Merge expand(3×3) → squeeze(1×1) into a single equivalent 3×3 conv.
+
+        Method: pass an identity (delta) signal through both layers to read
+        out the composite impulse response, then flip for cross-correlation.
+        """
+        if self.collapsed:
+            return
+
+        C_in  = self.conv_expand.in_channels
+        k     = self.conv_expand.kernel_size[0]
+        pad   = k // 2
+        dev   = self.conv_expand.weight.device
+
+        # Build delta: batch of C_in images, each with a 1 at (c, pad, pad)
+        delta = torch.zeros(C_in, C_in, k, k, device=dev)
+        for i in range(C_in):
+            delta[i, i, pad, pad] = 1.0
+
+        with torch.no_grad():
+            inter         = self.conv_expand(delta)           # [C_in, tmp_ch, k, k]
+            kernel_biased = self.conv_squeeze(inter)          # [C_in, C_out,  k, k]
+            bias          = self.conv_squeeze.bias.clone()
+            kernel        = kernel_biased - bias[None, :, None, None]
+            kernel        = torch.flip(kernel, [2, 3])        # cross-corr correction
+            kernel        = kernel.permute(1, 0, 2, 3).contiguous()  # [C_out, C_in, k, k]
+
+            C_out    = self.conv_squeeze.out_channels
+            new_conv = nn.Conv2d(C_in, C_out, k, padding=pad).to(dev)
+            new_conv.weight = nn.Parameter(kernel)
+            new_conv.bias   = nn.Parameter(bias)
+
+        self.conv_expand  = new_conv
+        self.conv_squeeze = nn.Identity()
+        self.collapsed    = True
+
+
+class ResidualCollapsibleLinearBlock(CollapsibleLinearBlock):
+    """
+    CLB with residual connection (requires in_ch == out_ch).
+
+    Training:  x + squeeze(expand(x))  → activation
+    Collapsed: equivalent single 3×3 conv (residual folded into center pixel)
+               → activation
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, tmp_ch: int = None):
+        assert in_ch == out_ch, "ResidualCollapsibleLinearBlock requires in_ch == out_ch"
+        super().__init__(in_ch, out_ch, tmp_ch)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.collapsed:
+            return self.activation(self.conv_expand(x))
+        return self.activation(x + self.conv_squeeze(self.conv_expand(x)))
+
+    def collapse(self):
+        if self.collapsed:
+            return
+        super().collapse()
+        # Fold the residual identity into the collapsed kernel:
+        # add 1 to the center spatial position for each (out_ch, in_ch) diagonal.
+        k   = self.conv_expand.kernel_size[0]
+        mid = k // 2
+        with torch.no_grad():
+            C = self.conv_expand.in_channels
+            for i in range(C):
+                self.conv_expand.weight[i, i, mid, mid] += 1.0
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _conv(in_ch: int, out_ch: int, block_type: str = 'conv', tmp_ch: int = None):
+    """
+    Factory for a single feature-extraction unit.
+
+    block_type='conv' : standard Conv2d 3×3 + LeakyReLU  (default)
+    block_type='clb'  : CollapsibleLinearBlock or ResidualCLB (when in_ch==out_ch)
+    """
+    if block_type == 'clb':
+        if in_ch == out_ch:
+            return ResidualCollapsibleLinearBlock(in_ch, out_ch, tmp_ch)
+        else:
+            return CollapsibleLinearBlock(in_ch, out_ch, tmp_ch)
     return nn.Sequential(
         nn.Conv2d(in_ch, out_ch, 3, padding=1),
         nn.LeakyReLU(0.2, inplace=True),
@@ -42,6 +162,11 @@ class UNetSR(nn.Module):
       num_in_ch=3 — standard RGB input
       num_in_ch=4 — mask-concat: concatenate binary mask as 4th channel
                     before the network (no SFT layers)
+
+    block_type:
+      'conv' — standard Conv2d 3×3 + LeakyReLU (default)
+      'clb'  — Collapsible Linear Block (SESR); call collapse_clb() before
+               deployment to merge expand+squeeze into one 3×3 conv
     """
 
     def __init__(
@@ -50,32 +175,42 @@ class UNetSR(nn.Module):
         num_out_ch: int = 3,
         num_feat: int = 64,
         scale: int = 4,
+        block_type: str = 'conv',
     ):
         super().__init__()
         self.scale = scale
         self.num_out_ch = num_out_ch
         F_ = num_feat
+        tmp_ch = F_ * 4   # CLB intermediate channels (4× expansion, like SESR)
+
+        B = lambda ic, oc: _conv(ic, oc, block_type, tmp_ch)
 
         self.anchor = Interpolate(scale_factor=scale, mode='bilinear')
         self.pooling = nn.AvgPool2d(2, 2)
 
         # Encoder
-        self.conv_first = _conv(num_in_ch, F_)
-        self.conv1 = _conv(F_, F_)          # (B, F, H, W)
-        self.conv2 = _conv(F_, F_)          # after pool → (B, F, H/2, W/2)
-        self.conv3 = _conv(F_, F_)
-        self.conv4 = _conv(F_, F_)          # after pool → (B, F, H/4, W/4)
-        self.conv5 = _conv(F_, F_)          # bottleneck
+        self.conv_first = B(num_in_ch, F_)   # non-residual (channels change)
+        self.conv1 = B(F_, F_)               # (B, F, H, W)
+        self.conv2 = B(F_, F_)               # after pool → (B, F, H/2, W/2)
+        self.conv3 = B(F_, F_)
+        self.conv4 = B(F_, F_)               # after pool → (B, F, H/4, W/4)
+        self.conv5 = B(F_, F_)               # bottleneck
 
         # Decoder — skip connections via addition (same channel count at all levels)
-        self.conv6 = _conv(F_, F_)
-        self.conv7 = _conv(F_, F_)
-        self.conv8 = _conv(F_, F_)
-        self.conv9 = _conv(F_, F_)
+        self.conv6 = B(F_, F_)
+        self.conv7 = B(F_, F_)
+        self.conv8 = B(F_, F_)
+        self.conv9 = B(F_, F_)
 
-        # Sub-pixel output
+        # Sub-pixel output — plain conv (channels differ; not collapsed)
         self.conv_last = nn.Conv2d(F_, num_out_ch * scale ** 2, 3, padding=1)
         self.depth_to_space = nn.PixelShuffle(scale)
+
+    def collapse_clb(self):
+        """Collapse all CLBs into single-conv equivalents (call before deployment)."""
+        for m in self.modules():
+            if isinstance(m, CollapsibleLinearBlock):
+                m.collapse()
 
     def forward(self, x: torch.Tensor, seg_map=None) -> torch.Tensor:
         if seg_map is not None and x.shape[1] == 3:
@@ -124,6 +259,9 @@ class SegGuidedUNetSR(nn.Module):
       - After each decoder stage
 
     This mirrors the design of SegGuidedRRDBNet in realesrgan_arch.py.
+
+    block_type: same as UNetSR — 'conv' (default) or 'clb'.
+    Note: SFT gamma/beta convolutions always use standard conv2d.
     """
 
     def __init__(
@@ -133,39 +271,49 @@ class SegGuidedUNetSR(nn.Module):
         num_feat: int = 64,
         scale: int = 4,
         num_seg_classes: int = 2,
+        block_type: str = 'conv',
     ):
         super().__init__()
         self.scale = scale
         self.num_seg_classes = num_seg_classes
         self.num_out_ch = num_out_ch
         F_ = num_feat
+        tmp_ch = F_ * 4
+
+        B = lambda ic, oc: _conv(ic, oc, block_type, tmp_ch)
 
         from .sr_integration import SFTBlock
 
         self.anchor = Interpolate(scale_factor=scale, mode='bilinear')
         self.pooling = nn.AvgPool2d(2, 2)
 
-        # Encoder (identical to UNetSR)
-        self.conv_first = _conv(num_in_ch, F_)
-        self.conv1 = _conv(F_, F_)
-        self.conv2 = _conv(F_, F_)
-        self.conv3 = _conv(F_, F_)
-        self.conv4 = _conv(F_, F_)
-        self.conv5 = _conv(F_, F_)
+        # Encoder
+        self.conv_first = B(num_in_ch, F_)
+        self.conv1 = B(F_, F_)
+        self.conv2 = B(F_, F_)
+        self.conv3 = B(F_, F_)
+        self.conv4 = B(F_, F_)
+        self.conv5 = B(F_, F_)
 
         # Decoder
-        self.conv6 = _conv(F_, F_)
-        self.conv7 = _conv(F_, F_)
-        self.conv8 = _conv(F_, F_)
-        self.conv9 = _conv(F_, F_)
+        self.conv6 = B(F_, F_)
+        self.conv7 = B(F_, F_)
+        self.conv8 = B(F_, F_)
+        self.conv9 = B(F_, F_)
 
         self.conv_last = nn.Conv2d(F_, num_out_ch * scale ** 2, 3, padding=1)
         self.depth_to_space = nn.PixelShuffle(scale)
 
-        # SFT blocks — one per injection point, all operating on F_ channels
+        # SFT blocks — standard conv (not CLB; gamma/beta are small 1-layer nets)
         self.sft_bottleneck = SFTBlock(F_, num_seg_classes)
-        self.sft_dec2 = SFTBlock(F_, num_seg_classes)
-        self.sft_dec1 = SFTBlock(F_, num_seg_classes)
+        self.sft_dec2       = SFTBlock(F_, num_seg_classes)
+        self.sft_dec1       = SFTBlock(F_, num_seg_classes)
+
+    def collapse_clb(self):
+        """Collapse all CLBs into single-conv equivalents (call before deployment)."""
+        for m in self.modules():
+            if isinstance(m, CollapsibleLinearBlock):
+                m.collapse()
 
     def _seg(self, seg_map: torch.Tensor, target_size) -> torch.Tensor:
         """Resize and one-hot-encode seg_map to match a feature map spatial size."""
