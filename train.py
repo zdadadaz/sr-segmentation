@@ -127,7 +127,7 @@ def parse_args():
     _apply_config(args, cfg)
 
     # Validate required fields
-    missing = [n for n, v in [('--hr_dir', args.hr_dir), ('--lr_dir', args.lr_dir), ('--mask_dir', args.mask_dir)] if not v]
+    missing = [n for n, v in [('--hr_dir', args.hr_dir), ('--lr_dir', args.lr_dir)] if not v]
     if missing:
         parser.error(f"Missing required fields: {', '.join(missing)} (pass via CLI or config data section)")
 
@@ -169,16 +169,21 @@ def run_validation(model, args, epoch, name_prefix=""):
         lr_tensor = TF.to_tensor(lr_pil).unsqueeze(0).to(device)
         
         # Load Mask
-        m_path = val_mask_path / (img_path.stem + '.png')
-        if not m_path.exists(): m_path = val_mask_path / img_path.name
-        
-        if m_path.exists():
-            mask_pil = Image.open(m_path).convert('L')
-            mask_tensor = TF.to_tensor(mask_pil).unsqueeze(0).to(device)
-            mask_tensor = (mask_tensor > 0.5).float()
-        else:
-            # Fallback empty mask
-            mask_tensor = torch.zeros((1, 1, lr_pil.height * args.scale, lr_pil.width * args.scale), device=device)
+        mask_tensor = None
+        if args.val_mask_dir:
+            val_mask_path = Path(args.val_mask_dir)
+            m_path = val_mask_path / (img_path.stem + '.png')
+            if not m_path.exists(): m_path = val_mask_path / img_path.name
+            
+            if m_path.exists():
+                mask_pil = Image.open(m_path).convert('L')
+                mask_tensor = TF.to_tensor(mask_pil).unsqueeze(0).to(device)
+                mask_tensor = (mask_tensor > 0.5).float()
+                
+        if mask_tensor is None:
+            # Fallback empty mask if directory not provided or filename not found
+            # mask_tensor should be target resolution (HR)
+            mask_tensor = torch.zeros((1, 1, h * args.scale, w * args.scale), device=device)
             
         # Pad to multiple of 4 (for UNet architectures)
         h, w = lr_tensor.shape[2:]
@@ -229,6 +234,12 @@ def main():
     model = build_model(args.arch, args.model_type, args.scale, args.device)
 
     print("Initializing SegAwareLoss...")
+    # If no mask_dir provided, we should probably use equal weights (standard loss)
+    if not args.mask_dir:
+        print("  [Note] No mask_dir provided. Using standard (equal) weights for loss.")
+        args.hair_weight = 1.0
+        args.other_weight = 1.0
+
     criterion = SegAwareLoss(
         hair_weight=args.hair_weight,
         other_weight=args.other_weight,

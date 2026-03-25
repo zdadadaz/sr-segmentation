@@ -196,7 +196,7 @@ def parse_args():
     _apply_config(args, cfg)
 
     # Validate required fields
-    missing = [n for n, v in [('--hr_dir', args.hr_dir), ('--lr_dir', args.lr_dir), ('--mask_dir', args.mask_dir)] if not v]
+    missing = [n for n, v in [('--hr_dir', args.hr_dir), ('--lr_dir', args.lr_dir)] if not v]
     if missing:
         parser.error(f"Missing required fields: {', '.join(missing)} (pass via CLI or config data section)")
 
@@ -248,6 +248,12 @@ def main():
     netD = VGGDiscriminator(num_in_ch=3, num_feat=args.d_feat).to(device)
 
     # ---- Losses ------------------------------------------------------------
+    # If no mask_dir provided, we should probably use equal weights (standard loss)
+    if not args.mask_dir:
+        print("  [Note] No mask_dir provided. Using standard (equal) weights for loss.")
+        args.hair_weight = 1.0
+        args.other_weight = 1.0
+
     criterion_pixel = SegAwareLoss(
         hair_weight=args.hair_weight,
         other_weight=args.other_weight,

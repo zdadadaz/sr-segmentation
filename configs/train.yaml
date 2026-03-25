@@ -8,7 +8,7 @@
 data:
   hr_dir: ~          # required
   lr_dir: ~          # required
-  mask_dir: ~        # required
+  mask_dir: ~        # optional (leave as ~ for standard SR without masks)
 
 # ---------------------------------------------------------------------------
 # Model architecture
@@ -60,5 +60,5 @@ gan:
 validation:
   enabled: true
   val_lr_dir: ~        # Path to validation LR images
-  val_mask_dir: ~      # Path to validation masks
+  val_mask_dir: ~      # optional (Path to validation masks)
   save_val_imgs: true  # Save SR results during validation

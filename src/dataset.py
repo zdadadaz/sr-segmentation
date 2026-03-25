@@ -22,7 +22,7 @@ class SRSegDataset(Dataset):
         super(SRSegDataset, self).__init__()
         self.hr_dir = Path(hr_dir)
         self.lr_dir = Path(lr_dir)
-        self.mask_dir = Path(mask_dir)
+        self.mask_dir = Path(mask_dir) if mask_dir else None
         self.patch_size = patch_size
         self.scale = scale
         self.augment = augment
@@ -62,19 +62,20 @@ class SRSegDataset(Dataset):
         filename = Path(hr_path).name
         
         lr_path = self.lr_dir / filename
-        mask_path = self.mask_dir / filename
-        
-        # In case we generate dummy data with different extensions
         if not lr_path.exists():
              lr_path = self.lr_dir / (Path(hr_path).stem + '.png')
-        if not mask_path.exists():
-             mask_path = self.mask_dir / (Path(hr_path).stem + '.png')
+             
+        mask_path = None
+        if self.mask_dir:
+            mask_path = self.mask_dir / filename
+            if not mask_path.exists():
+                 mask_path = self.mask_dir / (Path(hr_path).stem + '.png')
 
         # Load images
         img_h = Image.open(hr_path).convert('RGB')
         img_l = Image.open(lr_path).convert('RGB')
         
-        if mask_path.exists():
+        if mask_path and mask_path.exists():
             mask = Image.open(mask_path).convert('L')
         else:
             # Fallback empty mask if missing
