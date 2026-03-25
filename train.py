@@ -180,8 +180,24 @@ def run_validation(model, args, epoch, name_prefix=""):
             # Fallback empty mask
             mask_tensor = torch.zeros((1, 1, lr_pil.height * args.scale, lr_pil.width * args.scale), device=device)
             
+        # Pad to multiple of 4 (for UNet architectures)
+        h, w = lr_tensor.shape[2:]
+        pad_h = (4 - h % 4) % 4
+        pad_w = (4 - w % 4) % 4
+        
+        if pad_h > 0 or pad_w > 0:
+            # Pad LR image
+            lr_tensor = torch.nn.functional.pad(lr_tensor, (0, pad_w, 0, pad_h), mode='reflect')
+            # Pad Mask (respecting its relative scale to LR)
+            mh, mw = mask_tensor.shape[2:]
+            sh, sw = mh // h, mw // w # usually scale
+            mask_tensor = torch.nn.functional.pad(mask_tensor, (0, pad_w * sw, 0, pad_h * sh), mode='constant', value=0)
+
         # Inference
         sr_tensor = model(lr_tensor, mask_tensor)
+        
+        # Crop back to original size
+        sr_tensor = sr_tensor[:, :, :h * args.scale, :w * args.scale]
         
         # Save
         sr_pil = TF.to_pil_image(sr_tensor.squeeze(0).clamp(0, 1))

@@ -108,13 +108,27 @@ def main():
             mask_tensor = torch.zeros((1, 1, image.height * args.scale, image.width * args.scale), device=device)
         
         # 3. Model Forward
-        # SFT models expect seg_map at output resolution? 
-        # actually, src.pipeline.forward_model handles resizing if needed.
-        # But wait, SegGuidedRRDBNet and SegGuidedUNetSR in train.py:
-        # they handle it.
-        
         try:
-            sr_tensor = model(img_tensor, mask_tensor)
+            # Note: h,w are input LR scale sizes
+            h, w = img_tensor.shape[2:]
+            pad_h = (4 - h % 4) % 4
+            pad_w = (4 - w % 4) % 4
+            
+            if pad_h > 0 or pad_w > 0:
+                # Pad Image
+                img_tensor_padded = torch.nn.functional.pad(img_tensor, (0, pad_w, 0, pad_h), mode='reflect')
+                # Pad Mask (mask follows same spatial padding but scaled)
+                mh, mw = mask_tensor.shape[2:]
+                sh, sw = mh // h, mw // w
+                mask_tensor_padded = torch.nn.functional.pad(mask_tensor, (0, pad_w * sw, 0, pad_h * sh), mode='constant', value=0)
+            else:
+                img_tensor_padded = img_tensor
+                mask_tensor_padded = mask_tensor
+
+            sr_tensor = model(img_tensor_padded, mask_tensor_padded)
+            
+            # 4. Crop back to original target resolution
+            sr_tensor = sr_tensor[:, :, :h * args.scale, :w * args.scale]
             
             # 4. Save result
             sr_image = TF.to_pil_image(sr_tensor.squeeze(0).clamp(0, 1))
