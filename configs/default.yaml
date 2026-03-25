@@ -25,7 +25,28 @@ sam:
 # SpeciesNet settings
 speciesnet:
   confidence_threshold: 0.5
-  use_classifier: true   # true: filter non-mammal animals via EfficientNet V2 classifier (slower)
+  use_classifier: true   # true: enables EfficientNet V2 classifier for species-level filtering (slower)
+
+  # Taxonomy whitelist — only applies when use_classifier: true
+  # Leave all lists empty (or omit) to keep default behaviour: mammalia only.
+  # Each non-empty list acts as an allowlist for that level; ALL specified levels must match.
+  # Ambiguous predictions (ANIMAL / UNKNOWN sentinel) are always kept conservatively.
+  #
+  # Taxonomy levels in the label file:
+  #   UUID ; class ; order ; family ; genus ; species ; common_name
+  #
+  # Examples:
+  #   class:  [mammalia]                        # all mammals (same as default)
+  #   order:  [carnivora, rodentia]             # carnivores + rodents only
+  #   family: [felidae, canidae, ursidae]       # cats, dogs, bears only
+  #   genus:  [canis, felis]
+  #   species: [lupus, catus]
+  allowed_taxonomy:
+    class: []
+    order: []
+    family: []
+    genus: []
+    species: []
 
 # Face parser selection: 'bisenet' or 'facexformer'
 face_parser: bisenet

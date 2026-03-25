@@ -29,9 +29,18 @@ class SpeciesNetDetector:
     In full-pipeline mode (use_classifier=True):
         predict() output per image additionally contains:
             'prediction': full label string "UUID;class;order;family;genus;species;common_name"
-        Detections where 'prediction' resolves to a non-mammalia class are discarded.
-        Ambiguous results (Classification.ANIMAL, Classification.UNKNOWN, or missing
-        prediction key) are kept conservatively.
+
+        Taxonomy filtering (only active when use_classifier=True):
+          - If 'allowed_taxonomy' is NOT set in config → keep mammalia only (default)
+          - If 'allowed_taxonomy' IS set → filter by specified levels (class/order/family/genus/species)
+            Each non-empty level acts as an allowlist; ALL specified levels must match.
+            Sentinel predictions (ANIMAL, UNKNOWN) are always kept conservatively.
+
+        Example config:
+            speciesnet:
+              use_classifier: true
+              allowed_taxonomy:
+                family: [felidae, canidae, ursidae]  # cats, dogs, bears only
     """
 
     def __init__(
@@ -45,7 +54,7 @@ class SpeciesNetDetector:
         self.use_classifier = self.config.get('use_classifier', False)
         self.model_path = model_path
         self.model = None
-        self.furry_labels: Optional[set] = None
+        self._sentinels: Optional[set] = None   # Classification.ANIMAL / UNKNOWN
         self._load_model()
 
     def _load_model(self):
@@ -59,64 +68,58 @@ class SpeciesNetDetector:
             # Full pipeline: detector + EfficientNet V2 classifier + ensemble.
             # Significantly slower than detector-only (classifier runs on each crop).
             self.model = SpeciesNet(self.model_path, components='all', geofence=False)
-            self.furry_labels = self._load_furry_labels()
+            self._sentinels = self._load_sentinels()
         else:
             # Detector-only mode — fast, returns all animals regardless of species.
             self.model = SpeciesNet(self.model_path, components='detector', geofence=False)
 
-    def _load_furry_labels(self) -> set:
-        """
-        Build a set of SpeciesNet label strings that represent furry (mammal) animals.
-
-        The label file format (one per line):
-            UUID;class;order;family;genus;species;common_name
-
-        We keep labels where class == 'mammalia'.  Additionally, two sentinel values
-        from speciesnet.constants are added as conservative fallbacks:
-          - Classification.ANIMAL: ensemble could not narrow to a species → keep
-          - Classification.UNKNOWN: classifier returned 'no cv result' → keep
-        """
-        model_dir = Path(self.model_path)
-        info = json.loads((model_dir / 'info.json').read_text(encoding='utf-8'))
-        labels_path = model_dir / info['classifier_labels']
-
-        furry = set()
-        with open(labels_path, encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(';')
-                if len(parts) > 1 and parts[1] == 'mammalia':
-                    furry.add(line)
-
-        # Conservative: keep detections when classifier is uncertain
+    def _load_sentinels(self) -> set:
+        """Load Classification.ANIMAL and Classification.UNKNOWN sentinel strings."""
         from speciesnet.constants import Classification
-        furry.add(Classification.ANIMAL.value)   # generic "animal" sentinel
-        furry.add(Classification.UNKNOWN.value)  # "no cv result"
-        return furry
+        return {Classification.ANIMAL.value, Classification.UNKNOWN.value}
 
-    def _is_furry(self, prediction_label: Optional[str]) -> bool:
+    def _is_allowed(self, prediction_label: Optional[str]) -> bool:
         """
-        Return True if the ensemble prediction indicates a furry (mammal) animal,
-        or if the prediction is ambiguous/missing (conservative keep).
+        Return True if the prediction passes the active taxonomy filter.
 
-        Args:
-            prediction_label: Full label string from SpeciesNet ensemble, e.g.
-                "UUID;mammalia;carnivora;felidae;panthera;leo;lion", or None.
+        Filter logic:
+          - None / malformed label          → conservative keep (True)
+          - Sentinel (ANIMAL / UNKNOWN)     → conservative keep (True)
+          - allowed_taxonomy not configured → keep mammalia only (default)
+          - allowed_taxonomy configured     → each non-empty level acts as an
+            allowlist; ALL specified levels must match.
 
-        Returns:
-            True  → keep detection (mammal or uncertain)
-            False → discard detection (confirmed non-mammal: aves/reptilia/etc.)
+        Taxonomy label format:
+            UUID ; class ; order ; family ; genus ; species ; common_name
+              0      1       2       3        4       5          6
         """
         if prediction_label is None:
-            return True  # missing key → conservative keep
-        if prediction_label in self.furry_labels:
-            return True  # O(1) lookup covers all mammalia + sentinels
+            return True
+        if prediction_label in self._sentinels:
+            return True
+
         parts = prediction_label.split(';')
         if len(parts) < 2:
             return True  # malformed → conservative keep
-        return parts[1] == 'mammalia'  # safety net for any label not in set
+
+        taxonomy = self.config.get('allowed_taxonomy') or {}
+        level_map = {'class': 1, 'order': 2, 'family': 3, 'genus': 4, 'species': 5}
+        has_whitelist = any(taxonomy.get(lvl) for lvl in level_map)
+
+        if not has_whitelist:
+            # Default behaviour: mammalia only
+            return parts[1] == 'mammalia'
+
+        # Custom whitelist: every specified level must match
+        for level, idx in level_map.items():
+            allowed = taxonomy.get(level) or []
+            if not allowed:
+                continue                    # level not restricted
+            if idx >= len(parts) or not parts[idx]:
+                continue                    # label doesn't reach this level → keep
+            if parts[idx] not in allowed:
+                return False
+        return True
 
     def detect_animals(
         self,
@@ -164,8 +167,8 @@ class SpeciesNetDetector:
                     continue
                 if d['conf'] < self.confidence_threshold:
                     continue
-                if self.use_classifier and not self._is_furry(prediction_label):
-                    continue  # discard confirmed non-mammal (bird, reptile, etc.)
+                if self.use_classifier and not self._is_allowed(prediction_label):
+                    continue  # discard by taxonomy filter
 
                 xmin, ymin, bw, bh = d['bbox']        # normalized xywh
                 x1 = xmin * w
