@@ -40,13 +40,13 @@ class PerceptualLoss(nn.Module):
         vgg = vgg19(weights=VGG19_Weights.IMAGENET1K_V1)
         
         # Layer indices for VGG19 (ReLU outputs):
-        # conv1_2: index 3, weight 0.1
-        # conv2_2: index 8, weight 0.1
-        # conv3_4: index 17, weight 1.0
-        # conv4_4: index 26, weight 1.0
-        # conv5_4: index 35, weight 1.0
+        # conv1_2: index  3, weight 0.1  — low-level edges
+        # conv2_2: index  8, weight 0.1  — low-level texture
+        # conv3_4: index 17, weight 1.0  — mid-level texture (sharp detail)
+        # conv4_4: index 26, weight 1.0  — mid-high semantics
+        # conv5_4: index 35, weight 0.5  — high-level semantics (reduced to avoid over-smoothing)
         self.layer_weights = {
-            '3': 0.1, '8': 0.1, '17': 1.0, '26': 1.0, '35': 1.0
+            '3': 0.1, '8': 0.1, '17': 1.0, '26': 1.0, '35': 0.5
         }
         
         self.features = vgg.features[:36].to(device)
@@ -125,7 +125,7 @@ def _apply_config(args, cfg):
     if args.d_feat        is None: args.d_feat        = gan_cfg.get('d_feat',       64)
     if args.save_every    is None: args.save_every    = gan_cfg.get('save_every',   5)
     if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
-    if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'l2')
+    if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'ragan')
 
     # Validation
     val_cfg = cfg.get('validation', {}) or {}
@@ -178,7 +178,8 @@ def parse_args():
     parser.add_argument('--d_feat',       type=int,   default=None, help='Discriminator base channels')
     parser.add_argument('--save_every',   type=int,   default=None, help='Save checkpoint every N epochs')
     parser.add_argument('--ema_decay',    type=float, default=None, help='Generator EMA decay')
-    parser.add_argument('--gan_loss_type', type=str,  default=None, choices=['l1', 'l2'], help='GAN loss: l1 | l2')
+    parser.add_argument('--gan_loss_type', type=str,  default=None, choices=['l1', 'l2', 'ragan'],
+                        help='GAN loss: l1 | l2 (LSGAN) | ragan (Relativistic Average GAN, recommended)')
 
     # Validation
     parser.add_argument('--val_enabled', action='store_true', default=None, help='Enable validation during training')
@@ -264,11 +265,15 @@ def main():
 
     criterion_perceptual = PerceptualLoss(device).to(device)
 
-    # Adverarial loss: l1 or l2
+    # Adversarial loss function (used for both LSGAN and RAGAN base criterion)
+    # ragan / l2 → MSE;  l1 → L1
     if args.gan_loss_type == 'l1':
         criterion_gan = nn.L1Loss()
     else:
-        criterion_gan = nn.MSELoss()
+        criterion_gan = nn.MSELoss()   # covers both l2 and ragan
+
+    use_ragan = (args.gan_loss_type == 'ragan')
+    print(f"  GAN loss: {args.gan_loss_type}  |  w_pixel={args.w_pixel}  w_perceptual={args.w_perceptual}  w_adv={args.w_adv}")
 
     # ---- Optimizers --------------------------------------------------------
     optG = optim.Adam(netG.parameters(), lr=args.lr_g, betas=(0.9, 0.99))
@@ -304,9 +309,19 @@ def main():
                 sr = netG(lr, mask)
 
             d_real = netD(hr)
-            d_fake = netD(sr.detach())
+            d_fake = netD(sr)   # sr already detached (came from no_grad block)
 
-            loss_d = 0.5 * (criterion_gan(d_real, rl) + criterion_gan(d_fake, fl))
+            if use_ragan:
+                # Relativistic Average GAN:
+                # D tries to make D(real) - mean(D(fake)) → 1
+                #                  D(fake) - mean(D(real)) → 0
+                loss_d = 0.5 * (
+                    criterion_gan(d_real - d_fake.mean().detach(), rl) +
+                    criterion_gan(d_fake - d_real.mean().detach(), fl)
+                )
+            else:
+                loss_d = 0.5 * (criterion_gan(d_real, rl) + criterion_gan(d_fake, fl))
+
             loss_d.backward()
             optD.step()
 
@@ -319,7 +334,19 @@ def main():
 
             loss_pix = criterion_pixel(sr, hr, mask)
             loss_per = criterion_perceptual(sr, hr)
-            loss_adv = criterion_gan(netD(sr), rl)
+
+            d_fake_g = netD(sr)
+            if use_ragan:
+                # G tries to make D(fake) - mean(D(real)) → 1
+                #               D(real) - mean(D(fake)) → 0
+                with torch.no_grad():
+                    d_real_g = netD(hr)
+                loss_adv = 0.5 * (
+                    criterion_gan(d_fake_g - d_real_g.mean(), rl) +
+                    criterion_gan(d_real_g - d_fake_g.mean(), fl)
+                )
+            else:
+                loss_adv = criterion_gan(d_fake_g, rl)
 
             loss_g = (
                 args.w_pixel      * loss_pix +
