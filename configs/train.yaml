@@ -52,7 +52,6 @@ gan:
   w_pixel: 1.0         # SegAwareLoss (pixel) weight
   w_perceptual: 1.0    # Multi-layer VGG19 perceptual loss weight
   w_adv: 0.1           # Adversarial loss weight (Generator side)
-  gan_loss_type: vanilla # vanilla (BCE) | ragan | lsgan | hinge
   d_type: unet         # unet (Spectral Norm) | vgg (standard)
   d_feat: 64           # Discriminator base channels
   save_every: 5        # Save checkpoint every N epochs

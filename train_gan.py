@@ -123,7 +123,6 @@ def _apply_config(args, cfg):
     if args.d_type        is None: args.d_type        = gan_cfg.get('d_type',       'unet')
     if args.save_every    is None: args.save_every    = gan_cfg.get('save_every',   5)
     if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
-    if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'ragan')
     if args.milestones    is None: args.milestones    = gan_cfg.get('milestones',    [50, 100])
     if args.gamma         is None: args.gamma         = gan_cfg.get('gamma',         0.5)
 
@@ -181,9 +180,6 @@ def parse_args():
     parser.add_argument('--d_type',       type=str,   default=None, choices=['vgg', 'unet'], help='vgg | unet (default)')
     parser.add_argument('--save_every',   type=int,   default=None, help='Save checkpoint every N epochs')
     parser.add_argument('--ema_decay',    type=float, default=None, help='Generator EMA decay')
-    parser.add_argument('--gan_loss_type', type=str,  default=None, choices=['l1', 'l2', 'ragan'],
-                        help='GAN loss: l1 | l2 (LSGAN) | ragan (Relativistic Average GAN, recommended)')
-    
     # Scheduler
     parser.add_argument('--milestones', type=int, nargs='+', default=[50, 100], help='Epoch milestones for LR decay')
     parser.add_argument('--gamma',      type=float, default=0.5, help='LR decay factor')
@@ -277,10 +273,10 @@ def main():
 
     # Adversarial loss function (used for both LSGAN and RAGAN base criterion)
     # ragan / l2 → MSE;  l1 → L1
-    criterion_gan = GANLoss(gan_type=args.gan_loss_type, loss_weight=args.w_adv).to(device)
-
-    use_ragan = (args.gan_loss_type == 'ragan')
-    print(f"  GAN loss: {args.gan_loss_type}  |  w_pixel={args.w_pixel}  w_perceptual={args.w_perceptual}  w_adv={args.w_adv}")
+    # Always use RAGAN logic: BCE weight is 0.5 per sample in standard ragan.
+    # We use 'vanilla' (BCEWithLogitsLoss) as the core loss for RaGAN.
+    criterion_gan = GANLoss(gan_type='vanilla', loss_weight=args.w_adv).to(device)
+    print(f"  GAN loss: RaGAN (via vanilla BCE) | w_pixel={args.w_pixel} w_perceptual={args.w_perceptual} w_adv={args.w_adv}")
 
     # ---- Optimizers & Schedulers -------------------------------------------
     optG = optim.Adam(netG.parameters(), lr=args.lr_g, betas=(0.9, 0.99))
@@ -327,28 +323,26 @@ def main():
             B = gt.size(0)
 
             # (2) Optimize Generator
-            # We follow BasicSR: block D gradients when training G
+            # RaGAN G loss: (BCE(d_fake - mean(d_real), 1) + BCE(d_real - mean(d_fake), 0)) / 2
             for p in netD.parameters():
                 p.requires_grad = False
             optG.zero_grad()
 
             sr = netG(lr, mask)
 
-            # Pixel loss
+            # Pixel & Perceptual losses
             loss_pix = criterion_pixel(sr, gt, mask)
-            # Perceptual loss
             loss_per = criterion_perceptual(sr, gt)
-            # Adv loss
+
+            # Adv loss (RaGAN)
             d_fake_g = netD(sr)
-            if use_ragan:
-                with torch.no_grad():
-                    d_real_g = netD(gt)
-                loss_adv = 0.5 * (
-                    criterion_gan(d_fake_g - d_real_g.mean(), target_is_real=True, is_disc=False) +
-                    criterion_gan(d_real_g - d_fake_g.mean(), target_is_real=False, is_disc=False)
-                )
-            else:
-                loss_adv = criterion_gan(d_fake_g, target_is_real=True, is_disc=False)
+            with torch.no_grad():
+                d_real_g = netD(gt)
+            
+            loss_adv = 0.5 * (
+                criterion_gan(d_fake_g - d_real_g.mean(), target_is_real=True, is_disc=False) +
+                criterion_gan(d_real_g - d_fake_g.mean(), target_is_real=False, is_disc=False)
+            )
 
             loss_g = (
                 args.w_pixel      * loss_pix +
@@ -360,28 +354,23 @@ def main():
             optG.step()
 
             # (3) Optimize Discriminator
+            # RaGAN D loss: (BCE(d_real - mean(d_fake), 1) + BCE(d_fake - mean(d_real), 0)) / 2
             for p in netD.parameters():
                 p.requires_grad = True
             optD.zero_grad()
 
             # Real
             d_real = netD(gt)
-            if use_ragan:
-                with torch.no_grad():
-                    d_fake_tmp = netD(sr.detach())
-                loss_d_real = 0.5 * criterion_gan(d_real - d_fake_tmp.mean(), target_is_real=True, is_disc=True)
-            else:
-                loss_d_real = criterion_gan(d_real, target_is_real=True, is_disc=True)
+            with torch.no_grad():
+                d_fake_tmp = netD(sr.detach())
+            loss_d_real = 0.5 * criterion_gan(d_real - d_fake_tmp.mean(), target_is_real=True, is_disc=True)
             loss_d_real.backward()
 
             # Fake
             d_fake = netD(sr.detach().clone())
-            if use_ragan:
-                with torch.no_grad():
-                   d_real_tmp = netD(gt)
-                loss_d_fake = 0.5 * criterion_gan(d_fake - d_real_tmp.mean(), target_is_real=False, is_disc=True)
-            else:
-                loss_d_fake = criterion_gan(d_fake, target_is_real=False, is_disc=True)
+            with torch.no_grad():
+               d_real_tmp = netD(gt)
+            loss_d_fake = 0.5 * criterion_gan(d_fake - d_real_tmp.mean(), target_is_real=False, is_disc=True)
             loss_d_fake.backward()
             
             optD.step()
