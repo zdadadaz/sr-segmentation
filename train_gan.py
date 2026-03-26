@@ -125,6 +125,8 @@ def _apply_config(args, cfg):
     if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
     if args.milestones    is None: args.milestones    = gan_cfg.get('milestones',    [50, 100])
     if args.gamma         is None: args.gamma         = gan_cfg.get('gamma',         0.5)
+    if args.net_d_iters   is None: args.net_d_iters   = gan_cfg.get('net_d_iters',   1)
+    if args.net_d_init_iters is None: args.net_d_init_iters = gan_cfg.get('net_d_init_iters', 0)
 
     # Validation
     val_cfg = cfg.get('validation', {}) or {}
@@ -180,6 +182,8 @@ def parse_args():
     parser.add_argument('--d_type',       type=str,   default=None, choices=['vgg', 'unet'], help='vgg | unet (default)')
     parser.add_argument('--save_every',   type=int,   default=None, help='Save checkpoint every N epochs')
     parser.add_argument('--ema_decay',    type=float, default=None, help='Generator EMA decay')
+    parser.add_argument('--net_d_iters',  type=int,   default=None, help='Generator D update delay iter')
+    parser.add_argument('--net_d_init_iters', type=int, default=None, help='Initial D-only iterations')
     # Scheduler
     parser.add_argument('--milestones', type=int, nargs='+', default=[50, 100], help='Epoch milestones for LR decay')
     parser.add_argument('--gamma',      type=float, default=0.5, help='LR decay factor')
@@ -322,55 +326,55 @@ def main():
             
             B = gt.size(0)
 
+            global_iter = (epoch - 1) * len(train_loader) + current_iter
+
+            loss_g = torch.tensor(0.0).to(device)
             # (2) Optimize Generator
-            # RaGAN G loss: (BCE(d_fake - mean(d_real), 1) + BCE(d_real - mean(d_fake), 0)) / 2
             for p in netD.parameters():
                 p.requires_grad = False
-            optG.zero_grad()
 
+            optG.zero_grad()
             sr = netG(lr, mask)
 
-            # Pixel & Perceptual losses
-            loss_pix = criterion_pixel(sr, gt, mask)
-            loss_per = criterion_perceptual(sr, gt)
+            if (global_iter % args.net_d_iters == 0 and global_iter > args.net_d_init_iters):
+                # Pixel loss
+                loss_pix = criterion_pixel(sr, gt, mask)
+                loss_g += args.w_pixel * loss_pix
 
-            # Adv loss (RaGAN)
-            d_fake_g = netD(sr)
-            with torch.no_grad():
-                d_real_g = netD(gt)
-            
-            loss_adv = 0.5 * (
-                criterion_gan(d_fake_g - d_real_g.mean(), target_is_real=True, is_disc=False) +
-                criterion_gan(d_real_g - d_fake_g.mean(), target_is_real=False, is_disc=False)
-            )
+                # Perceptual loss
+                loss_per = criterion_perceptual(sr, gt)
+                loss_g += args.w_perceptual * loss_per
 
-            loss_g = (
-                args.w_pixel      * loss_pix +
-                args.w_perceptual * loss_per +
-                args.w_adv        * loss_adv
-            )
+                # GAN loss (G)
+                fake_g_pred = netD(sr)
+                loss_adv = criterion_gan(fake_g_pred, target_is_real=True, is_disc=False)
+                loss_g += args.w_adv * loss_adv
 
-            loss_g.backward()
-            optG.step()
+                loss_g.backward()
+                optG.step()
+                
+                totals['g_pix'] += loss_pix.item()
+                totals['g_per'] += loss_per.item()
+                totals['g_adv'] += loss_adv.item()
+            else:
+                loss_per = torch.tensor(0.0)
+                loss_adv = torch.tensor(0.0)
+                loss_pix = torch.tensor(0.0)
 
             # (3) Optimize Discriminator
-            # RaGAN D loss: (BCE(d_real - mean(d_fake), 1) + BCE(d_fake - mean(d_real), 0)) / 2
             for p in netD.parameters():
                 p.requires_grad = True
-            optD.zero_grad()
 
+            optD.zero_grad()
+            
             # Real
-            d_real = netD(gt)
-            with torch.no_grad():
-                d_fake_tmp = netD(sr.detach())
-            loss_d_real = 0.5 * criterion_gan(d_real - d_fake_tmp.mean(), target_is_real=True, is_disc=True)
+            real_d_pred = netD(gt)
+            loss_d_real = criterion_gan(real_d_pred, target_is_real=True, is_disc=True)
             loss_d_real.backward()
 
             # Fake
-            d_fake = netD(sr.detach().clone())
-            with torch.no_grad():
-               d_real_tmp = netD(gt)
-            loss_d_fake = 0.5 * criterion_gan(d_fake - d_real_tmp.mean(), target_is_real=False, is_disc=True)
+            fake_d_pred = netD(sr.detach().clone())
+            loss_d_fake = criterion_gan(fake_d_pred, target_is_real=False, is_disc=True)
             loss_d_fake.backward()
             
             optD.step()

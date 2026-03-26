@@ -56,6 +56,8 @@ gan:
   d_feat: 64           # Discriminator base channels
   save_every: 5        # Save checkpoint every N epochs
   ema_decay: 0.999     # Exponential Moving Average decay for Generator weights
+  net_d_iters: 1       # D updates per G update (or G updates per D updates effectively)
+  net_d_init_iters: 0  # Initial iterations to skip G update
   milestones: [30, 60] # Epochs to decay LR
   gamma: 0.5           # LR decay multiplier
 # ---------------------------------------------------------------------------
