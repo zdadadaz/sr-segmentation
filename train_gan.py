@@ -348,11 +348,20 @@ def main():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
         for current_iter, batch in enumerate(pbar):
             hr_origin = batch['hr'].to(device)
+            lr_origin = batch['lr'].to(device)
             mask_origin = batch['mask'].to(device)
+            has_lr = batch['has_lr'] # potential tensor of bools
 
-            # (1) Synthesize LR on-the-fly and sharpen GT
+            # (1) Prepare LR and sharpen GT
             with torch.no_grad():
-                lr, gt_usm = synthesizer.synthesize(hr_origin, mask_origin)
+                # If all samples in batch have LR, use them. Otherwise synthesize.
+                # (Simple batch-level check for implementation clarity)
+                if has_lr.all():
+                    lr = lr_origin
+                    gt_usm = usm_sharpener(hr_origin) # Simple sharpen
+                else:
+                    lr, gt_usm = synthesizer.synthesize(hr_origin, mask_origin)
+                
                 # Training pair pool for diversity
                 lr, gt_usm, mask = pair_pool.process(lr, gt_usm, mask_origin)
                 # Final USM sharpen of GT

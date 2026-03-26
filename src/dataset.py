@@ -21,7 +21,7 @@ class SRSegDataset(Dataset):
     def __init__(self, hr_dir, lr_dir, mask_dir, patch_size=256, scale=4, augment=True, is_train=True):
         super(SRSegDataset, self).__init__()
         self.hr_dir = Path(hr_dir)
-        self.lr_dir = Path(lr_dir)
+        self.lr_dir = Path(lr_dir) if lr_dir else None
         self.mask_dir = Path(mask_dir) if mask_dir else None
         self.patch_size = patch_size
         self.scale = scale
@@ -61,9 +61,15 @@ class SRSegDataset(Dataset):
         hr_path = self.hr_paths[index]
         filename = Path(hr_path).name
         
-        lr_path = self.lr_dir / filename
-        if not lr_path.exists():
-             lr_path = self.lr_dir / (Path(hr_path).stem + '.png')
+        lr_path = None
+        has_lr = False
+        if self.lr_dir:
+            lr_path = self.lr_dir / filename
+            if not lr_path.exists():
+                 lr_path = self.lr_dir / (Path(hr_path).stem + '.png')
+            
+            if lr_path.exists():
+                 has_lr = True
              
         mask_path = None
         if self.mask_dir:
@@ -73,8 +79,12 @@ class SRSegDataset(Dataset):
 
         # Load images
         img_h = Image.open(hr_path).convert('RGB')
-        img_l = Image.open(lr_path).convert('RGB')
-        
+        if has_lr:
+            img_l = Image.open(lr_path).convert('RGB')
+        else:
+            # Create a black image if LR not found (it will be synthesized by trainer)
+            img_l = Image.new('RGB', (img_h.width // self.scale, img_h.height // self.scale), (0,0,0))
+            
         if mask_path and mask_path.exists():
             mask = Image.open(mask_path).convert('L')
         else:
@@ -115,7 +125,12 @@ class SRSegDataset(Dataset):
         # Typically class 1 = hair. A simple binarize:
         mask = (mask > 0).float()
         
-        return {'lr': img_l, 'hr': img_h, 'mask': mask, 'lq_path': str(lr_path), 'gt_path': hr_path}
+        return {
+            'lr': img_l,
+            'hr': img_h,
+            'mask': mask,
+            'has_lr': has_lr
+        }
 
 def create_dataloader(hr_dir, lr_dir, mask_dir, batch_size=4, patch_size=256, scale=4, num_workers=4, is_train=True):
     dataset = SRSegDataset(hr_dir, lr_dir, mask_dir, patch_size, scale, augment=is_train, is_train=is_train)
