@@ -23,50 +23,11 @@ from tqdm import tqdm
 
 from src.dataset import create_dataloader
 from src.discriminator import VGGDiscriminator, UNetDiscriminatorSN
-from src.sr_integration import SegAwareLoss
+from src.loss import SegAwareLoss, PerceptualLoss
 from src.degradations import ESRGANSynthesizer, USMSharp
 from train import build_model, run_validation
 
 
-# ---------------------------------------------------------------------------
-# Perceptual (VGG feature) loss
-# ---------------------------------------------------------------------------
-
-class PerceptualLoss(nn.Module):
-    """L1 loss on multiple VGG19 feature maps."""
-
-    def __init__(self, device):
-        super().__init__()
-        from torchvision.models import vgg19, VGG19_Weights
-        vgg = vgg19(weights=VGG19_Weights.IMAGENET1K_V1)
-        
-        # Layer indices for VGG19 (ReLU outputs):
-        # conv1_2: index  3, weight 0.1  — low-level edges
-        # conv2_2: index  8, weight 0.1  — low-level texture
-        # conv3_4: index 17, weight 1.0  — mid-level texture (sharp detail)
-        # conv4_4: index 26, weight 1.0  — mid-high semantics
-        # conv5_4: index 35, weight 0.5  — high-level semantics (reduced to avoid over-smoothing)
-        self.layer_weights = {
-            '3': 0.1, '8': 0.1, '17': 1.0, '26': 1.0, '35': 1.0
-        }
-        
-        self.features = vgg.features[:36].to(device)
-        for p in self.features.parameters():
-            p.requires_grad = False
-        self.features.eval()
-
-    def forward(self, sr: torch.Tensor, hr: torch.Tensor) -> torch.Tensor:
-        # Input images are expected to be in [0, 1] range; clamp just in case.
-        x_sr = torch.clamp(sr, 0, 1)
-        x_hr = torch.clamp(hr, 0, 1)
-        
-        loss = 0
-        for name, module in self.features._modules.items():
-            x_sr = module(x_sr)
-            x_hr = module(x_hr)
-            if name in self.layer_weights:
-                loss += self.layer_weights[name] * nn.functional.l1_loss(x_sr, x_hr)
-        return loss
 
 
 def update_ema(netG_ema, netG, decay):

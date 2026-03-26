@@ -12,7 +12,7 @@ from tqdm import tqdm
 from src.realesrgan_arch import SegGuidedRRDBNet, RRDBNet
 from src.unet import UNetSR, SegGuidedUNetSR
 from src.dataset import create_dataloader
-from src.sr_integration import SegAwareLoss
+from src.loss import SegAwareLoss
 
 
 def build_model(arch: str, model_type: str, scale: int, device: str, block_type: str = 'conv'):
