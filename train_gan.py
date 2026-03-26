@@ -124,6 +124,8 @@ def _apply_config(args, cfg):
     if args.save_every    is None: args.save_every    = gan_cfg.get('save_every',   5)
     if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
     if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'ragan')
+    if args.milestones    is None: args.milestones    = gan_cfg.get('milestones',    [50, 100])
+    if args.gamma         is None: args.gamma         = gan_cfg.get('gamma',         0.5)
 
     # Validation
     val_cfg = cfg.get('validation', {}) or {}

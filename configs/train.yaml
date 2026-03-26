@@ -49,13 +49,16 @@ gan:
   pretrained_g: ~      # Path to warm-start generator (e.g. from train.py)
   lr_g: 1.0e-4
   lr_d: 1.0e-4
-  w_pixel: 0.1         # SegAwareLoss (pixel) weight — keep small to avoid L1 blurring
-  w_perceptual: 1.0    # Multi-layer VGG19 perceptual loss weight — primary sharpness driver
-  w_adv: 0.1           # Adversarial loss weight (Generator side) — enough pressure for texture
+  w_pixel: 1.0         # SegAwareLoss (pixel) weight
+  w_perceptual: 1.0    # Multi-layer VGG19 perceptual loss weight
+  w_adv: 0.1           # Adversarial loss weight (Generator side)
   gan_loss_type: ragan # ragan (Relativistic Average GAN) | l2 (LSGAN) | l1
+  d_type: unet         # unet (Spectral Norm) | vgg (standard)
   d_feat: 64           # Discriminator base channels
   save_every: 5        # Save checkpoint every N epochs
-  ema_decay: 0.999     # Exponential Moving Average decay for Generator weights (0 to disable)
+  ema_decay: 0.999     # Exponential Moving Average decay for Generator weights
+  milestones: [30, 60] # Epochs to decay LR
+  gamma: 0.5           # LR decay multiplier
 # ---------------------------------------------------------------------------
 # Validation settings
 # ---------------------------------------------------------------------------
