@@ -22,8 +22,9 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from src.dataset import create_dataloader
-from src.discriminator import VGGDiscriminator
+from src.discriminator import VGGDiscriminator, UNetDiscriminatorSN
 from src.sr_integration import SegAwareLoss
+from src.degradations import ESRGANSynthesizer, USMSharp
 from train import build_model, run_validation
 
 
@@ -46,7 +47,7 @@ class PerceptualLoss(nn.Module):
         # conv4_4: index 26, weight 1.0  — mid-high semantics
         # conv5_4: index 35, weight 0.5  — high-level semantics (reduced to avoid over-smoothing)
         self.layer_weights = {
-            '3': 0.1, '8': 0.1, '17': 1.0, '26': 1.0, '35': 0.5
+            '3': 0.1, '8': 0.1, '17': 1.0, '26': 1.0, '35': 1.0
         }
         
         self.features = vgg.features[:36].to(device)
@@ -69,14 +70,48 @@ class PerceptualLoss(nn.Module):
 
 
 def update_ema(netG_ema, netG, decay):
-    """
-    Update EMA model: netG_ema = netG_ema * decay + netG * (1 - decay)
-    """
+    """Update EMA model: netG_ema = netG_ema * decay + netG * (1 - decay)"""
     with torch.no_grad():
         msd = netG.state_dict()
         emsd = netG_ema.state_dict()
         for key in msd:
             emsd[key].copy_(emsd[key] * decay + (1.0 - decay) * msd[key])
+
+class TrainingPairPool:
+    """It is the training pair pool for increasing the diversity in a batch."""
+    def __init__(self, queue_size=180):
+        self.queue_size = queue_size
+        self.queue_lr = None
+        self.queue_gt = None
+        self.queue_mask = None
+        self.queue_ptr = 0
+
+    def process(self, lq, gt, mask):
+        b, c, h, w = lq.size()
+        if self.queue_lr is None:
+            self.queue_lr = torch.zeros(self.queue_size, c, h, w).to(lq.device)
+            self.queue_gt = torch.zeros(self.queue_size, gt.size(1), gt.size(2), gt.size(3)).to(gt.device)
+            self.queue_mask = torch.zeros(self.queue_size, mask.size(1), mask.size(2), mask.size(3)).to(mask.device)
+            self.queue_ptr = 0
+            
+        if self.queue_ptr == self.queue_size:
+            idx = torch.randperm(self.queue_size)
+            self.queue_lr = self.queue_lr[idx]
+            self.queue_gt = self.queue_gt[idx]
+            self.queue_mask = self.queue_mask[idx]
+            lq_dequeue = self.queue_lr[0:b].clone()
+            gt_dequeue = self.queue_gt[0:b].clone()
+            mask_dequeue = self.queue_mask[0:b].clone()
+            self.queue_lr[0:b] = lq.clone()
+            self.queue_gt[0:b] = gt.clone()
+            self.queue_mask[0:b] = mask.clone()
+            return lq_dequeue, gt_dequeue, mask_dequeue
+        else:
+            self.queue_lr[self.queue_ptr:self.queue_ptr + b] = lq.clone()
+            self.queue_gt[self.queue_ptr:self.queue_ptr + b] = gt.clone()
+            self.queue_mask[self.queue_ptr:self.queue_ptr + b] = mask.clone()
+            self.queue_ptr += b
+            return lq, gt, mask
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +156,10 @@ def _apply_config(args, cfg):
     if args.lr_g          is None: args.lr_g          = gan_cfg.get('lr_g',         1e-4)
     if args.lr_d          is None: args.lr_d          = gan_cfg.get('lr_d',         1e-4)
     if args.w_pixel       is None: args.w_pixel       = gan_cfg.get('w_pixel',      1.0)
-    if args.w_perceptual  is None: args.w_perceptual  = gan_cfg.get('w_perceptual', 0.1)
-    if args.w_adv         is None: args.w_adv         = gan_cfg.get('w_adv',        0.01)
+    if args.w_perceptual  is None: args.w_perceptual  = gan_cfg.get('w_perceptual', 1.0)
+    if args.w_adv         is None: args.w_adv         = gan_cfg.get('w_adv',        0.1)
     if args.d_feat        is None: args.d_feat        = gan_cfg.get('d_feat',       64)
+    if args.d_type        is None: args.d_type        = gan_cfg.get('d_type',       'unet')
     if args.save_every    is None: args.save_every    = gan_cfg.get('save_every',   5)
     if args.ema_decay     is None: args.ema_decay     = gan_cfg.get('ema_decay',    0.999)
     if args.gan_loss_type is None: args.gan_loss_type = gan_cfg.get('gan_loss_type', 'ragan')
@@ -179,10 +215,15 @@ def parse_args():
     parser.add_argument('--w_perceptual', type=float, default=None, help='VGG perceptual loss weight')
     parser.add_argument('--w_adv',        type=float, default=None, help='Adversarial loss weight (G)')
     parser.add_argument('--d_feat',       type=int,   default=None, help='Discriminator base channels')
+    parser.add_argument('--d_type',       type=str,   default=None, choices=['vgg', 'unet'], help='vgg | unet (default)')
     parser.add_argument('--save_every',   type=int,   default=None, help='Save checkpoint every N epochs')
     parser.add_argument('--ema_decay',    type=float, default=None, help='Generator EMA decay')
     parser.add_argument('--gan_loss_type', type=str,  default=None, choices=['l1', 'l2', 'ragan'],
                         help='GAN loss: l1 | l2 (LSGAN) | ragan (Relativistic Average GAN, recommended)')
+    
+    # Scheduler
+    parser.add_argument('--milestones', type=int, nargs='+', default=[50, 100], help='Epoch milestones for LR decay')
+    parser.add_argument('--gamma',      type=float, default=0.5, help='LR decay factor')
 
     # Validation
     parser.add_argument('--val_enabled', action='store_true', default=None, help='Enable validation during training')
@@ -248,8 +289,11 @@ def main():
         p_ema.requires_grad = False
 
     # ---- Discriminator -----------------------------------------------------
-    print("Initializing Discriminator...")
-    netD = VGGDiscriminator(num_in_ch=3, num_feat=args.d_feat).to(device)
+    print(f"Initializing Discriminator (type={args.d_type})...")
+    if args.d_type == 'unet':
+        netD = UNetDiscriminatorSN(num_in_ch=3, num_feat=args.d_feat).to(device)
+    else:
+        netD = VGGDiscriminator(num_in_ch=3, num_feat=args.d_feat).to(device)
 
     # ---- Losses ------------------------------------------------------------
     # If no mask_dir provided, we should probably use equal weights (standard loss)
@@ -278,12 +322,20 @@ def main():
     use_ragan = (args.gan_loss_type == 'ragan')
     print(f"  GAN loss: {args.gan_loss_type}  |  w_pixel={args.w_pixel}  w_perceptual={args.w_perceptual}  w_adv={args.w_adv}")
 
-    # ---- Optimizers --------------------------------------------------------
+    # ---- Optimizers & Schedulers -------------------------------------------
     optG = optim.Adam(netG.parameters(), lr=args.lr_g, betas=(0.9, 0.99))
     optD = optim.Adam(netD.parameters(), lr=args.lr_d, betas=(0.9, 0.99))
 
+    schedG = optim.lr_scheduler.MultiStepLR(optG, milestones=args.milestones, gamma=args.gamma)
+    schedD = optim.lr_scheduler.MultiStepLR(optD, milestones=args.milestones, gamma=args.gamma)
+
     real_label = torch.ones(args.batch_size, 1, device=device)
     fake_label = torch.zeros(args.batch_size, 1, device=device)
+
+    # ---- Real-ESRGAN Synthesis & Queue -------------------------------------
+    synthesizer = ESRGANSynthesizer(device, scale=args.scale)
+    usm_sharpener = USMSharp().to(device)
+    pair_pool = TrainingPairPool(queue_size=180) # multiple of batch_size
 
     # ---- Training loop -----------------------------------------------------
     print("Starting GAN Training...")
@@ -294,56 +346,39 @@ def main():
         totals = {'g': 0., 'g_pix': 0., 'g_per': 0., 'g_adv': 0., 'd': 0.}
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
-        for batch in pbar:
-            hr   = batch['hr'].to(device)
-            lr   = batch['lr'].to(device)
-            mask = batch['mask'].to(device)
+        for current_iter, batch in enumerate(pbar):
+            hr_origin = batch['hr'].to(device)
+            mask_origin = batch['mask'].to(device)
 
-            B  = hr.size(0)
+            # (1) Synthesize LR on-the-fly and sharpen GT
+            with torch.no_grad():
+                lr, gt_usm = synthesizer.synthesize(hr_origin, mask_origin)
+                # Training pair pool for diversity
+                lr, gt_usm, mask = pair_pool.process(lr, gt_usm, mask_origin)
+                # Final USM sharpen of GT
+                gt = usm_sharpener(gt_usm)
+            
+            B = gt.size(0)
             rl = real_label[:B]
             fl = fake_label[:B]
 
-            # ----------------------------------------------------------------
-            # (1) Update Discriminator
-            # ----------------------------------------------------------------
-            optD.zero_grad()
-
-            with torch.no_grad():
-                sr = netG(lr, mask)
-
-            d_real = netD(hr)
-            d_fake = netD(sr)   # sr already detached (came from no_grad block)
-
-            if use_ragan:
-                # Relativistic Average GAN:
-                # D tries to make D(real) - mean(D(fake)) → 1
-                #                  D(fake) - mean(D(real)) → 0
-                loss_d = 0.5 * (
-                    criterion_gan(d_real - d_fake.mean().detach(), rl) +
-                    criterion_gan(d_fake - d_real.mean().detach(), fl)
-                )
-            else:
-                loss_d = 0.5 * (criterion_gan(d_real, rl) + criterion_gan(d_fake, fl))
-
-            loss_d.backward()
-            optD.step()
-
-            # ----------------------------------------------------------------
-            # (2) Update Generator
-            # ----------------------------------------------------------------
+            # (2) Optimize Generator
+            # We follow BasicSR: block D gradients when training G
+            for p in netD.parameters():
+                p.requires_grad = False
             optG.zero_grad()
 
             sr = netG(lr, mask)
 
-            loss_pix = criterion_pixel(sr, hr, mask)
-            loss_per = criterion_perceptual(sr, hr)
-
+            # Pixel loss
+            loss_pix = criterion_pixel(sr, gt, mask)
+            # Perceptual loss
+            loss_per = criterion_perceptual(sr, gt)
+            # Adv loss
             d_fake_g = netD(sr)
             if use_ragan:
-                # G tries to make D(fake) - mean(D(real)) → 1
-                #               D(real) - mean(D(fake)) → 0
                 with torch.no_grad():
-                    d_real_g = netD(hr)
+                    d_real_g = netD(gt)
                 loss_adv = 0.5 * (
                     criterion_gan(d_fake_g - d_real_g.mean(), rl) +
                     criterion_gan(d_real_g - d_fake_g.mean(), fl)
@@ -359,6 +394,34 @@ def main():
 
             loss_g.backward()
             optG.step()
+
+            # (3) Optimize Discriminator
+            for p in netD.parameters():
+                p.requires_grad = True
+            optD.zero_grad()
+
+            # Real
+            d_real = netD(gt)
+            if use_ragan:
+                with torch.no_grad():
+                    d_fake_tmp = netD(sr.detach())
+                loss_d_real = 0.5 * criterion_gan(d_real - d_fake_tmp.mean(), rl)
+            else:
+                loss_d_real = 0.5 * criterion_gan(d_real, rl)
+            loss_d_real.backward()
+
+            # Fake
+            d_fake = netD(sr.detach().clone())
+            if use_ragan:
+                with torch.no_grad():
+                   d_real_tmp = netD(gt)
+                loss_d_fake = 0.5 * criterion_gan(d_fake - d_real_tmp.mean(), fl)
+            else:
+                loss_d_fake = 0.5 * criterion_gan(d_fake, fl)
+            loss_d_fake.backward()
+            
+            optD.step()
+            loss_d = loss_d_real + loss_d_fake
 
             # Update EMA
             if args.ema_decay > 0:
@@ -383,6 +446,10 @@ def main():
             f"(pix={totals['g_pix']/n:.4f}  per={totals['g_per']/n:.4f}  adv={totals['g_adv']/n:.4f})  "
             f"D={totals['d']/n:.4f}"
         )
+        
+        # Step schedulers
+        schedG.step()
+        schedD.step()
 
         # ---- Save Checkpoints ----------------------------------------------
         if epoch % args.save_every == 0 or epoch == args.epochs:
