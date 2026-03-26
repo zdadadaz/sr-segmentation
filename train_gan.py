@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from src.dataset import create_dataloader
 from src.discriminator import VGGDiscriminator, UNetDiscriminatorSN
-from src.loss import SegAwareLoss, PerceptualLoss
+from src.loss import SegAwareLoss, PerceptualLoss, GANLoss
 from src.degradations import ESRGANSynthesizer, USMSharp
 from train import build_model, run_validation
 
@@ -277,10 +277,7 @@ def main():
 
     # Adversarial loss function (used for both LSGAN and RAGAN base criterion)
     # ragan / l2 → MSE;  l1 → L1
-    if args.gan_loss_type == 'l1':
-        criterion_gan = nn.L1Loss()
-    else:
-        criterion_gan = nn.MSELoss()   # covers both l2 and ragan
+    criterion_gan = GANLoss(gan_type=args.gan_loss_type, loss_weight=args.w_adv).to(device)
 
     use_ragan = (args.gan_loss_type == 'ragan')
     print(f"  GAN loss: {args.gan_loss_type}  |  w_pixel={args.w_pixel}  w_perceptual={args.w_perceptual}  w_adv={args.w_adv}")
@@ -291,9 +288,6 @@ def main():
 
     schedG = optim.lr_scheduler.MultiStepLR(optG, milestones=args.milestones, gamma=args.gamma)
     schedD = optim.lr_scheduler.MultiStepLR(optD, milestones=args.milestones, gamma=args.gamma)
-
-    real_label = torch.ones(args.batch_size, 1, device=device)
-    fake_label = torch.zeros(args.batch_size, 1, device=device)
 
     # ---- Real-ESRGAN Synthesis & Queue -------------------------------------
     synthesizer = ESRGANSynthesizer(device, scale=args.scale)
@@ -331,8 +325,6 @@ def main():
                 gt = usm_sharpener(gt_usm)
             
             B = gt.size(0)
-            rl = real_label[:B]
-            fl = fake_label[:B]
 
             # (2) Optimize Generator
             # We follow BasicSR: block D gradients when training G
@@ -352,11 +344,11 @@ def main():
                 with torch.no_grad():
                     d_real_g = netD(gt)
                 loss_adv = 0.5 * (
-                    criterion_gan(d_fake_g - d_real_g.mean(), rl) +
-                    criterion_gan(d_real_g - d_fake_g.mean(), fl)
+                    criterion_gan(d_fake_g - d_real_g.mean(), target_is_real=True, is_disc=False) +
+                    criterion_gan(d_real_g - d_fake_g.mean(), target_is_real=False, is_disc=False)
                 )
             else:
-                loss_adv = criterion_gan(d_fake_g, rl)
+                loss_adv = criterion_gan(d_fake_g, target_is_real=True, is_disc=False)
 
             loss_g = (
                 args.w_pixel      * loss_pix +
@@ -377,9 +369,9 @@ def main():
             if use_ragan:
                 with torch.no_grad():
                     d_fake_tmp = netD(sr.detach())
-                loss_d_real = 0.5 * criterion_gan(d_real - d_fake_tmp.mean(), rl)
+                loss_d_real = 0.5 * criterion_gan(d_real - d_fake_tmp.mean(), target_is_real=True, is_disc=True)
             else:
-                loss_d_real = 0.5 * criterion_gan(d_real, rl)
+                loss_d_real = criterion_gan(d_real, target_is_real=True, is_disc=True)
             loss_d_real.backward()
 
             # Fake
@@ -387,9 +379,9 @@ def main():
             if use_ragan:
                 with torch.no_grad():
                    d_real_tmp = netD(gt)
-                loss_d_fake = 0.5 * criterion_gan(d_fake - d_real_tmp.mean(), fl)
+                loss_d_fake = 0.5 * criterion_gan(d_fake - d_real_tmp.mean(), target_is_real=False, is_disc=True)
             else:
-                loss_d_fake = 0.5 * criterion_gan(d_fake, fl)
+                loss_d_fake = criterion_gan(d_fake, target_is_real=False, is_disc=True)
             loss_d_fake.backward()
             
             optD.step()

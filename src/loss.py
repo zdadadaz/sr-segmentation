@@ -157,3 +157,54 @@ class SegAwareLoss(nn.Module):
         other_ssim = 1 - ssim(sr_clipped * other_mask, hr_clipped * other_mask)
         
         return 0.2 * (self.hair_weight * hair_ssim + self.other_weight * other_ssim)
+
+class GANLoss(nn.Module):
+    """
+    Define GAN loss.
+    Support 'vanilla', 'lsgan', 'wgan', 'hinge'.
+    """
+    def __init__(self, gan_type, real_label_val=1.0, fake_label_val=0.0, loss_weight=1.0):
+        super(GANLoss, self).__init__()
+        self.gan_type = gan_type
+        self.loss_weight = loss_weight
+        self.real_label_val = real_label_val
+        self.fake_label_val = fake_label_val
+
+        if self.gan_type == 'vanilla':
+            self.loss = nn.BCEWithLogitsLoss()
+        elif self.gan_type in ['lsgan', 'l2']:
+            self.loss = nn.MSELoss()
+        elif self.gan_type == 'wgan':
+            self.loss = self._wgan_loss
+        elif self.gan_type == 'wgan_softplus':
+            self.loss = self._wgan_softplus_loss
+        elif self.gan_type == 'hinge':
+            self.loss = nn.ReLU()
+        else:
+            raise NotImplementedError(f'GAN type {self.gan_type} is not implemented.')
+
+    def _wgan_loss(self, input, target):
+        return -input.mean() if target else input.mean()
+
+    def _wgan_softplus_loss(self, input, target):
+        return F.softplus(-input).mean() if target else F.softplus(input).mean()
+
+    def get_target_label(self, input, target_is_real):
+        if self.gan_type in ['wgan', 'wgan_softplus']:
+            return target_is_real
+        target_val = (self.real_label_val if target_is_real else self.fake_label_val)
+        return input.new_ones(input.size()) * target_val
+
+    def forward(self, input, target_is_real, is_disc=False):
+        target_label = self.get_target_label(input, target_is_real)
+        if self.gan_type == 'hinge':
+            if is_disc:
+                input = -input if target_is_real else input
+                loss = self.loss(1 + input).mean()
+            else:
+                loss = -input.mean()
+        else:
+            loss = self.loss(input, target_label)
+
+        # loss_weight is only for generator (not for discriminator)
+        return loss if is_disc else loss * self.loss_weight
