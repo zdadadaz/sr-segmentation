@@ -9,10 +9,13 @@ def filter2D(img, kernel):
     """
     Apply 2D filter to image.
     img: (B, C, H, W)
-    kernel: (B, k, k)
+    kernel: (B, k, k) OR (1, k, k)
     """
     k = kernel.size(-1)
     b, c, h, w = img.size()
+    if kernel.size(0) == 1:
+        kernel = kernel.repeat(b, 1, 1)
+        
     img = F.pad(img, (k // 2, k // 2, k // 2, k // 2), mode='reflect')
     # Reshape for depthwise convolution
     img = img.view(1, b * c, img.size(-2), img.size(-1))
