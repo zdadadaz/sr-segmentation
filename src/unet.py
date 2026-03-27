@@ -136,14 +136,21 @@ def _conv(in_ch: int, out_ch: int, block_type: str = 'conv', tmp_ch: int = None)
     """
     Factory for a single feature-extraction unit.
 
-    block_type='conv' : standard Conv2d 3×3 + LeakyReLU  (default)
-    block_type='clb'  : CollapsibleLinearBlock or ResidualCLB (when in_ch==out_ch)
+    block_type='conv'   : standard Conv2d 3×3 + LeakyReLU  (default)
+    block_type='clb'    : CollapsibleLinearBlock or ResidualCLB (when in_ch==out_ch)
+    block_type='dwconv' : Depthwise separable convolution (3×3 DW + 1×1 PW) + LeakyReLU
     """
     if block_type == 'clb':
         if in_ch == out_ch:
             return ResidualCollapsibleLinearBlock(in_ch, out_ch, tmp_ch)
         else:
             return CollapsibleLinearBlock(in_ch, out_ch, tmp_ch)
+    elif block_type == 'dwconv':
+        return nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, padding=1, groups=in_ch),  # Depthwise
+            nn.Conv2d(in_ch, out_ch, 1),                          # Pointwise
+            nn.LeakyReLU(0.2, inplace=True),
+        )
     return nn.Sequential(
         nn.Conv2d(in_ch, out_ch, 3, padding=1),
         nn.LeakyReLU(0.2, inplace=True),
@@ -272,11 +279,13 @@ class SegGuidedUNetSR(nn.Module):
         scale: int = 4,
         num_seg_classes: int = 2,
         block_type: str = 'conv',
+        num_levels: int = 2,
     ):
         super().__init__()
         self.scale = scale
         self.num_seg_classes = num_seg_classes
         self.num_out_ch = num_out_ch
+        self.num_levels = num_levels
         F_ = num_feat
         tmp_ch = F_ * 4
 
@@ -292,22 +301,27 @@ class SegGuidedUNetSR(nn.Module):
         self.conv1 = B(F_, F_)
         self.conv2 = B(F_, F_)
         self.conv3 = B(F_, F_)
-        self.conv4 = B(F_, F_)
-        self.conv5 = B(F_, F_)
+        
+        if self.num_levels >= 2:
+            self.conv4 = B(F_, F_)
+            self.conv5 = B(F_, F_)
 
         # Decoder
-        self.conv6 = B(F_, F_)
-        self.conv7 = B(F_, F_)
+        if self.num_levels >= 2:
+            self.conv6 = B(F_, F_)
+            self.conv7 = B(F_, F_)
+            
         self.conv8 = B(F_, F_)
         self.conv9 = B(F_, F_)
 
         self.conv_last = nn.Conv2d(F_, num_out_ch * scale ** 2, 3, padding=1)
         self.depth_to_space = nn.PixelShuffle(scale)
 
-        # SFT blocks — standard conv (not CLB; gamma/beta are small 1-layer nets)
+        # SFT blocks
         self.sft_bottleneck = SFTBlock(F_, num_seg_classes)
-        self.sft_dec2       = SFTBlock(F_, num_seg_classes)
-        self.sft_dec1       = SFTBlock(F_, num_seg_classes)
+        if self.num_levels >= 2:
+            self.sft_dec2 = SFTBlock(F_, num_seg_classes)
+        self.sft_dec1 = SFTBlock(F_, num_seg_classes)
 
     def collapse_clb(self):
         """Collapse all CLBs into single-conv equivalents (call before deployment)."""
@@ -330,32 +344,44 @@ class SegGuidedUNetSR(nn.Module):
             seg_map = s
         return seg_map
 
-    def forward(self, x: torch.Tensor, seg_map=None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, seg_map=None, return_feat=False):
         xup = self.anchor(x[:, :self.num_out_ch])
 
-        # Encoder
+        # Encoder Level 0
         x1 = self.conv_first(x)
         x1 = self.conv1(x1)
 
+        # Encoder Level 1
         x2 = self.pooling(x1)
         x2 = self.conv2(x2)
         x2 = self.conv3(x2)
+        
+        feat = x2
 
-        x3 = self.pooling(x2)
-        x3 = self.conv4(x3)
-        x3 = self.conv5(x3)
+        if self.num_levels >= 2:
+            # Encoder Level 2
+            x3 = self.pooling(x2)
+            x3 = self.conv4(x3)
+            x3 = self.conv5(x3)
+            feat = x3
 
+        # SFT Bottleneck
         if seg_map is not None:
-            x3 = self.sft_bottleneck(x3, self._seg(seg_map, x3.shape[2:]))
+            feat = self.sft_bottleneck(feat, self._seg(seg_map, feat.shape[2:]))
+            
+        bottleneck_feat = feat
 
         # Decoder
-        x2r = F.interpolate(x3, scale_factor=2, mode='bilinear', align_corners=False)
-        x2r = x2r + x2
-        x2r = self.conv6(x2r)
-        x2r = self.conv7(x2r)
+        if self.num_levels >= 2:
+            x2r = F.interpolate(bottleneck_feat, scale_factor=2, mode='bilinear', align_corners=False)
+            x2r = x2r + x2
+            x2r = self.conv6(x2r)
+            x2r = self.conv7(x2r)
 
-        if seg_map is not None:
-            x2r = self.sft_dec2(x2r, self._seg(seg_map, x2r.shape[2:]))
+            if seg_map is not None:
+                x2r = self.sft_dec2(x2r, self._seg(seg_map, x2r.shape[2:]))
+        else:
+            x2r = bottleneck_feat
 
         x1r = F.interpolate(x2r, scale_factor=2, mode='bilinear', align_corners=False)
         x1r = x1r + x1
@@ -366,4 +392,10 @@ class SegGuidedUNetSR(nn.Module):
             x1r = self.sft_dec1(x1r, self._seg(seg_map, x1r.shape[2:]))
 
         xr = self.conv_last(x1r)
-        return self.depth_to_space(xr) + xup
+        
+        out = self.depth_to_space(xr) + xup
+        
+        if return_feat:
+            # For KD: return the output AND the bottleneck feature map
+            return out, bottleneck_feat
+        return out

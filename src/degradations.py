@@ -20,23 +20,27 @@ def filter2D(img, kernel):
     out = F.conv2d(img, kernel, groups=b * c)
     return out.view(b, c, h, w)
 
-class USMSharp(nn.Module):
+class USMSharp(torch.nn.Module):
+
     def __init__(self, radius=50, sigma=0):
         super(USMSharp, self).__init__()
-        # Static gaussian kernel for USM
-        # In real-esrgan it's often a fixed kernel
-        pass
+        if radius % 2 == 0:
+            radius += 1
+        self.radius = radius
+        kernel = cv2.getGaussianKernel(radius, sigma)
+        kernel = torch.FloatTensor(np.dot(kernel, kernel.transpose())).unsqueeze_(0)
+        self.register_buffer('kernel', kernel)
 
-    def forward(self, img, weight=0.5, radius=50, threshold=10):
-        # Simple USM: out = img + weight * (img - blur)
-        # For simplicity in this script, we'll use a 5x5 gaussian blur
-        # This is a placeholder for the more complex BasicSR implementation
-        blur = F.avg_pool2d(img, kernel_size=3, stride=1, padding=1)
+    def forward(self, img, weight=0.5, threshold=10):
+        blur = filter2D(img, self.kernel)
         residual = img - blur
-        mask = torch.abs(residual) * 255. > threshold
+
+        mask = torch.abs(residual) * 255 > threshold
         mask = mask.float()
-        out = img + weight * residual * mask
-        return torch.clamp(out, 0, 1)
+        soft_mask = filter2D(mask, self.kernel)
+        sharp = img + weight * residual
+        sharp = torch.clip(sharp, 0, 1)
+        return soft_mask * sharp + (1 - soft_mask) * img
 
 def random_add_gaussian_noise_pt(img, sigma_range=(1, 30), gray_prob=0.1):
     sigma = random.uniform(sigma_range[0], sigma_range[1]) / 255.
