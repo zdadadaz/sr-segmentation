@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 import torch
-from perlin_noise import PerlinNoise
+import noise
 from scipy.ndimage import gaussian_filter, sobel
 
 class VegetationNoiseSynthesizer:
@@ -51,54 +51,50 @@ class VegetationNoiseSynthesizer:
 
     def generate_fbm_noise(self, height: int, width: int, seed: int = 42) -> np.ndarray:
         """
-        Generate FBM (Fractional Brownian Motion) noise map using octaves.
+        Generate FBM (Fractional Brownian Motion) noise map using the 'noise' library.
+        Moving the octave loop to C for a ~10-20x speedup.
         """
-        # The perlin-noise library does not accept 'ndim' or 'exp' in __init__.
-        # Dimensions are determined by the input to the noise function call.
-        noise_fn = PerlinNoise(seed=seed)
-
-        noise_map = np.zeros((height, width), dtype=np.float32)
-        amplitude = 1.0
-        frequency_sum = 0.0
-
         params = self._param_table[self.vegetation_type]
         fx, fy = params["base_frequency"]
+        directionality = params["directionality"]
+        
+        # Select noise function (pnoise2 = Perlin, snoise2 = Simplex)
+        if self.noise_type == "perlin":
+            noise_fn = noise.pnoise2
+        else:
+            noise_fn = noise.snoise2
 
-        # Optimized loop for performance if needed, but keeping original structure for now
-        for octave in range(1, self.octaves + 1):
-            freq_x = fx * (self.lacunarity ** (octave - 1))
-            freq_y = fy * (self.lacunarity ** (octave - 1))
-            frequency_sum += amplitude
+        # Optimization params
+        stretch = 1.0 + directionality
+        offset_y = 0.1 * directionality
+        
+        # Build noise map
+        # Although we still loop in Python over pixels, the fBm calculation (octaves) 
+        # is now entirely in C.
+        noise_map = np.zeros((height, width), dtype=np.float32)
+        
+        for y in range(height):
+            for x in range(width):
+                # Apply scaling and custom directionality
+                nx = x * fx * stretch
+                ny = y * fy + offset_y
+                
+                # base determines the seed
+                noise_map[y, x] = noise_fn(
+                    nx, ny,
+                    octaves=self.octaves,
+                    persistence=self.persistence,
+                    lacunarity=self.lacunarity,
+                    base=seed
+                )
 
-            # Use meshgrid for efficiency instead of nested loops
-            y_indices, x_indices = np.mgrid[0:height, 0:width]
+        # The 'noise' library returns values roughly in range [-1, 1].
+        # We normalize to [0, 1] for texture injection.
+        noise_min = noise_map.min()
+        noise_max = noise_map.max()
+        if noise_max > noise_min:
+            noise_map = (noise_map - noise_min) / (noise_max - noise_min)
             
-            nx = x_indices * freq_x
-            ny = y_indices * freq_y
-            
-            if params["directionality"] > 0:
-                stretch_factor = 1.0 + params["directionality"]
-                nx *= stretch_factor
-                ny += 0.1 * params["directionality"]
-
-            # PerlinNoise object unfortunately might not support vectorized input if it's the specific PyPI package
-            # If performance is an issue, a more vectorized noise generator should be used.
-            # But let's follow the provided logic first, with a small optimization for the coordinate transformation.
-            # Note: perlin_noise package's __call__ is usually slow in loops.
-            
-            # For now, let's keep the user's logic but wrap it.
-            for y in range(height):
-                for x in range(width):
-                    curr_nx = x * freq_x
-                    curr_ny = y * freq_y
-                    if params["directionality"] > 0:
-                        curr_nx *= (1.0 + params["directionality"])
-                        curr_ny += 0.1 * params["directionality"]
-                    noise_map[y, x] += amplitude * noise_fn([curr_nx, curr_ny])
-
-            amplitude *= self.persistence
-
-        noise_map /= frequency_sum
         return noise_map
 
     def generate_vegetation_texture(
