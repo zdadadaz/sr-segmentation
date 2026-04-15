@@ -53,10 +53,9 @@ class VegetationNoiseSynthesizer:
         """
         Generate FBM (Fractional Brownian Motion) noise map using octaves.
         """
-        if self.noise_type == "perlin":
-            noise_fn = PerlinNoise(ndim=2, seed=seed)
-        else:  # simplex
-            noise_fn = PerlinNoise(ndim=2, seed=seed, exp=1.0)
+        # The perlin-noise library does not accept 'ndim' or 'exp' in __init__.
+        # Dimensions are determined by the input to the noise function call.
+        noise_fn = PerlinNoise(seed=seed)
 
         noise_map = np.zeros((height, width), dtype=np.float32)
         amplitude = 1.0
