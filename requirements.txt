@@ -31,3 +31,5 @@ transformers>=4.30.0
 # Optional
 # tensorboard>=2.12.0
 # wandb>=0.14.0
+perlin-noise>=1.13
+
