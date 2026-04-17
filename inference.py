@@ -24,13 +24,14 @@ def parse_args():
     parser.add_argument('--arch', type=str, default=None, choices=['rrdb', 'unet'], help='Generator architecture')
     parser.add_argument('--model_type', type=str, default=None, choices=['sft', 'mask_concat'], help='Mask integration mode')
     parser.add_argument('--scale', type=int, default=None, help='SR scale')
+    parser.add_argument('--num_seg_classes', type=int, default=None, help='Number of segmentation classes')
     parser.add_argument('--device', type=str, default='auto', help='cuda | cpu | auto')
     
     # Vegetation Post-Processing
     parser.add_argument('--veg_method', type=str, default='none', choices=['none', 'noise_synthesis', 'guided_sharpness'], 
                         help='Post-processing method for vegetation areas')
     parser.add_argument('--veg_mask_dir', type=str, default=None, help='Specific path to vegetation masks (if different from --mask_dir)')
-    parser.add_argument('--veg_strength', type=float, default=0.15, help='Strength for vegetation enhancement')
+    parser.add_argument('--veg_strength', type=float, default=0.4, help='Strength for vegetation enhancement')
     parser.add_argument('--veg_type', type=str, default='auto', choices=['grass', 'tree', 'flower', 'auto'], help='Type of vegetation')
     parser.add_argument('--hr_ref_dir', type=str, default=None, help='Path to HR reference images (required for guided_sharpness)')
     
@@ -44,11 +45,13 @@ def parse_args():
             if args.arch is None: args.arch = model_cfg.get('arch', 'rrdb')
             if args.model_type is None: args.model_type = model_cfg.get('model_type', 'sft')
             if args.scale is None: args.scale = model_cfg.get('scale', 4)
+            if args.num_seg_classes is None: args.num_seg_classes = model_cfg.get('num_seg_classes', 2)
     
     # Defaults if not in config or CLI
     if args.arch is None: args.arch = 'rrdb'
     if args.model_type is None: args.model_type = 'sft'
     if args.scale is None: args.scale = 4
+    if args.num_seg_classes is None: args.num_seg_classes = 2
     
     return args
 
@@ -68,7 +71,7 @@ def main():
     
     # Load model
     print(f"🧠 Loading model: {args.arch} ({args.model_type}) from {args.model_path}")
-    model = build_model(args.arch, args.model_type, args.scale, device)
+    model = build_model(args.arch, args.model_type, args.scale, device, num_seg_classes=args.num_seg_classes)
     checkpoint = torch.load(args.model_path, map_location=device)
     
     # Handle both full checkpoints (with optimizer etc) and state_dicts
@@ -138,8 +141,18 @@ def main():
                 # Subtract vegetation from hair mask
                 mask_np_orig = np.where(veg_mask_resized > 127, 0, mask_np_orig)
             
-            mask_tensor = TF.to_tensor(Image.fromarray(mask_np_orig)).unsqueeze(0).to(device)
-            mask_tensor = (mask_tensor > 0.5).float()
+            
+            # Use multi-class labels if num_seg_classes > 2
+            if args.num_seg_classes > 2:
+                # If RGB, it might be one-hot. If L, it's index.
+                if mask_pil.mode == 'RGB':
+                    mask_tensor = TF.to_tensor(mask_pil).unsqueeze(0).to(device)
+                else:
+                    # Keep indices
+                    mask_tensor = torch.from_numpy(mask_np_orig).unsqueeze(0).unsqueeze(0).float().to(device)
+            else:
+                mask_tensor = TF.to_tensor(Image.fromarray(mask_np_orig)).unsqueeze(0).to(device)
+                mask_tensor = (mask_tensor > 0.5).float()
         else:
             mask_tensor = torch.zeros((1, 1, image.height * args.scale, image.width * args.scale), device=device)
 
@@ -180,6 +193,10 @@ def main():
                     else:
                         print(f"  ⚠️ HR reference not found for {img_path.name}. Skipping guided sharpness.")
                 
+                # Debug: Show mask coverage
+                veg_coverage = (veg_mask_np > 127).mean() * 100
+                print(f"  🌿 Vegetation coverage: {veg_coverage:.2f}% (Strength: {args.veg_strength})")
+
                 sr_image_np = apply_vegetation_post_processing(
                     sr_output=sr_image_np,
                     vegetation_mask=(veg_mask_np > 127),

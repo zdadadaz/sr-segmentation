@@ -15,7 +15,7 @@ class VegetationNoiseSynthesizer:
         octaves: int = 6,
         lacunarity: float = 2.0,      # Frequency multiplier per octave
         persistence: float = 0.5,      # Amplitude decay per octave
-        noise_strength: float = 0.15,  # Global texture strength
+        noise_strength: float = 0.4,   # Increased from 0.15 for better visibility
         vegetation_type: str = "auto", # "grass", "tree", "flower", "auto"
     ):
         self.noise_type = noise_type
@@ -28,24 +28,24 @@ class VegetationNoiseSynthesizer:
         # Parameter table based on vegetation type
         self._param_table = {
             "grass": {
-                "base_frequency": (0.012, 0.015),  # (x_freq, y_freq)
-                "directionality": 0.6,             # Horizontal preference
-                "edge_amplification": 1.8,
+                "base_frequency": (0.04, 0.05),   # Increased frequency for finer details
+                "directionality": 0.6,
+                "edge_amplification": 2.2,
             },
             "tree": {
-                "base_frequency": (0.008, 0.020),
+                "base_frequency": (0.03, 0.04),
                 "directionality": 0.3,
-                "edge_amplification": 1.2,
+                "edge_amplification": 1.5,
             },
             "flower": {
-                "base_frequency": (0.020, 0.020),
-                "directionality": 0.0,  # Radial symmetry
-                "edge_amplification": 2.0,
+                "base_frequency": (0.06, 0.06),
+                "directionality": 0.0,
+                "edge_amplification": 2.5,
             },
             "auto": {
-                "base_frequency": (0.010, 0.010),
+                "base_frequency": (0.04, 0.04),
                 "directionality": 0.2,
-                "edge_amplification": 1.5,
+                "edge_amplification": 1.8,
             },
         }
 
@@ -76,24 +76,30 @@ class VegetationNoiseSynthesizer:
         for y in range(height):
             for x in range(width):
                 # Apply scaling and custom directionality
-                nx = x * fx * stretch
-                ny = y * fy + offset_y
+                # Add a small epsilon (0.1) to avoid sampling exactly on integer grid points
+                # which often return 0.0 in Perlin noise implementations.
+                nx = x * fx * stretch + 0.1
+                ny = y * fy + offset_y + 0.1
                 
-                # base determines the seed
+                # noise.pnoise2/snoise2 expects coordinates and seed (base)
                 noise_map[y, x] = noise_fn(
                     nx, ny,
                     octaves=self.octaves,
                     persistence=self.persistence,
                     lacunarity=self.lacunarity,
-                    base=seed
+                    base=int(seed) % 1024 # Keep base in a reasonable range
                 )
 
         # The 'noise' library returns values roughly in range [-1, 1].
         # We normalize to [0, 1] for texture injection.
         noise_min = noise_map.min()
         noise_max = noise_map.max()
+
         if noise_max > noise_min:
             noise_map = (noise_map - noise_min) / (noise_max - noise_min)
+        else:
+            # Fallback if noise is flat (should not happen with Perlin)
+            noise_map = np.full_like(noise_map, 0.5)
             
         return noise_map
 
@@ -124,8 +130,8 @@ class VegetationNoiseSynthesizer:
         params = self._param_table[self.vegetation_type]
         edge_amp = params["edge_amplification"]
 
-        local_strength = self.noise_strength * (1.0 + edge_amp * edge_strength)
-        local_strength = np.clip(local_strength, 0, 0.5)
+        local_strength = self.noise_strength * (1.2 + edge_amp * edge_strength)
+        local_strength = np.clip(local_strength, 0, 0.9)
 
         # Step 3: Apply mask and inject texture
         enhanced = image.copy().astype(np.float32) / 255.0

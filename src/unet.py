@@ -337,11 +337,16 @@ class SegGuidedUNetSR(nn.Module):
             seg_map = F.interpolate(seg_map, size=target_size,
                                     mode='bilinear', align_corners=False)
         if seg_map.shape[1] != self.num_seg_classes:
-            s = torch.zeros(seg_map.shape[0], 2, *seg_map.shape[2:],
-                            device=seg_map.device)
-            s[:, 0] = 1 - seg_map[:, 0]
-            s[:, 1] = seg_map[:, 0]
-            seg_map = s
+            if self.num_seg_classes == 2 and seg_map.shape[1] == 1:
+                s = torch.zeros(seg_map.shape[0], 2, *seg_map.shape[2:],
+                                device=seg_map.device)
+                s[:, 0] = 1 - seg_map[:, 0]
+                s[:, 1] = seg_map[:, 0]
+                seg_map = s
+            else:
+                # Generic multi-class one-hot
+                seg_map = F.one_hot(seg_map.squeeze(1).long(), num_classes=self.num_seg_classes)
+                seg_map = seg_map.permute(0, 3, 1, 2).float()
         return seg_map
 
     def forward(self, x: torch.Tensor, seg_map=None, return_feat=False):

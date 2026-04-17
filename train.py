@@ -15,22 +15,22 @@ from src.dataset import create_dataloader
 from src.loss import SegAwareLoss
 
 
-def build_model(arch: str, model_type: str, scale: int, device: str, block_type: str = 'conv'):
+def build_model(arch: str, model_type: str, scale: int, device: str, block_type: str = 'conv', num_seg_classes: int = 2):
     """Instantiate generator based on arch, model_type, and block_type."""
     if arch == 'unet':
         if model_type == 'mask_concat':
-            return UNetSR(num_in_ch=4, num_out_ch=3, num_feat=64, scale=scale,
+            return UNetSR(num_in_ch=3 + num_seg_classes, num_out_ch=3, num_feat=64, scale=scale,
                           block_type=block_type).to(device)
         else:  # sft
             return SegGuidedUNetSR(num_in_ch=3, num_out_ch=3, num_feat=64, scale=scale,
-                                   num_seg_classes=2, block_type=block_type).to(device)
+                                   num_seg_classes=num_seg_classes, block_type=block_type).to(device)
     else:  # rrdb (block_type not applicable)
         if model_type == 'mask_concat':
-            return RRDBNet(num_in_ch=4, num_out_ch=3, num_feat=64, num_block=23,
+            return RRDBNet(num_in_ch=3 + num_seg_classes, num_out_ch=3, num_feat=64, num_block=23,
                            num_grow_ch=32, scale=scale).to(device)
         else:  # sft
             return SegGuidedRRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23,
-                                    num_grow_ch=32, scale=scale, num_seg_classes=2).to(device)
+                                    num_grow_ch=32, scale=scale, num_seg_classes=num_seg_classes).to(device)
 
 
 
@@ -52,6 +52,7 @@ def _apply_config(args, cfg):
     if args.model_type is None: args.model_type = model_cfg.get('model_type', 'sft')
     if args.scale      is None: args.scale      = model_cfg.get('scale',      4)
     if args.block_type is None: args.block_type = model_cfg.get('block_type', 'conv')
+    if args.num_seg_classes is None: args.num_seg_classes = model_cfg.get('num_seg_classes', 2)
 
     # Train
     if args.epochs     is None: args.epochs     = train_cfg.get('epochs',     10)
@@ -66,6 +67,7 @@ def _apply_config(args, cfg):
     # Loss
     if args.hair_weight  is None: args.hair_weight  = loss_cfg.get('hair_weight',  2.0)
     if args.other_weight is None: args.other_weight = loss_cfg.get('other_weight', 1.0)
+    if args.class_weights is None: args.class_weights = loss_cfg.get('class_weights')
     if args.pixel_loss_type is None: args.pixel_loss_type = loss_cfg.get('pixel_loss_type', 'l1')
 
     # Bool flags: --no_perceptual / --no_ssim default to False (not set).
@@ -109,10 +111,12 @@ def parse_args():
                         help='sft: SFT injection | mask_concat: 4-ch input')
     parser.add_argument('--block_type', type=str, default=None, choices=['conv', 'clb'],
                         help='conv: standard 3×3 (default) | clb: Collapsible Linear Block (SESR)')
+    parser.add_argument('--num_seg_classes', type=int, default=None, help='Number of segmentation classes')
 
     # Loss
     parser.add_argument('--hair_weight',  type=float, default=None, help='Weight for hair/fur regions')
     parser.add_argument('--other_weight', type=float, default=None, help='Weight for non-hair regions')
+    parser.add_argument('--class_weights', type=float, nargs='+', default=None, help='Weights for multi-class regions')
     parser.add_argument('--no_perceptual', action='store_true', help='Disable perceptual loss')
     parser.add_argument('--no_ssim',       action='store_true', help='Disable SSIM loss')
     parser.add_argument('--pixel_loss_type', type=str, default=None, choices=['l1', 'l2'], 
@@ -237,7 +241,7 @@ def main():
     print(f"Dataset size: {len(train_loader.dataset)}")
 
     print(f"Initializing Model (arch={args.arch}, model_type={args.model_type})...")
-    model = build_model(args.arch, args.model_type, args.scale, args.device, args.block_type)
+    model = build_model(args.arch, args.model_type, args.scale, args.device, args.block_type, args.num_seg_classes)
 
     print("Initializing SegAwareLoss...")
     # If no mask_dir provided, we should probably use equal weights (standard loss)
@@ -247,6 +251,7 @@ def main():
         args.other_weight = 1.0
 
     criterion = SegAwareLoss(
+        class_weights=args.class_weights,
         hair_weight=args.hair_weight,
         other_weight=args.other_weight,
         use_perceptual=not args.no_perceptual,

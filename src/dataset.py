@@ -86,7 +86,12 @@ class SRSegDataset(Dataset):
             img_l = Image.new('RGB', (img_h.width // self.scale, img_h.height // self.scale), (0,0,0))
             
         if mask_path and mask_path.exists():
-            mask = Image.open(mask_path).convert('L')
+            mask_img = Image.open(mask_path)
+            # If mask has 3 channels (RGB), keep them. Otherwise use L.
+            if mask_img.mode == 'RGB':
+                mask = mask_img.convert('RGB')
+            else:
+                mask = mask_img.convert('L')
         else:
             # Fallback empty mask if missing
             mask = Image.new('L', img_h.size, 0)
@@ -119,11 +124,21 @@ class SRSegDataset(Dataset):
         # Convert to tensors
         img_l = TF.to_tensor(img_l)  # [3, H_l, W_l]
         img_h = TF.to_tensor(img_h)  # [3, H_h, W_h]
-        mask = TF.to_tensor(mask)    # [1, H_h, W_h]
         
-        # Ensure mask is binary or scaled hair mask: 
-        # Typically class 1 = hair. A simple binarize:
-        mask = (mask > 0).float()
+        if isinstance(mask, Image.Image) and mask.mode == 'L':
+            # For grayscale labels, we might want to keep exact values if they are indices.
+            # But usually they are 0 and 255. 
+            # If we use to_tensor, it becomes [0, 1].
+            mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0).float()
+            # If it's pure binary [0, 255], we might want to normalize to [0, 1] 
+            # but for multi-class labels as indices, we keep them as is.
+            # However, SegAwareLoss uses (seg_map > 0.5) for legacy support 
+            # and F.one_hot(long()) for multi-class.
+            # So if it's [0, 255], class 1 becomes 1, class 2 becomes 2.
+            # Wait, if labels are 0, 1, 2, then np.array(mask) gives 0, 1, 2.
+            mask = mask_tensor
+        else:
+            mask = TF.to_tensor(mask)    # [C, H_h, W_h], normalized to [0, 1]
         
         return {
             'lr': img_l,

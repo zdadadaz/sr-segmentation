@@ -42,11 +42,13 @@ class PerceptualLoss(nn.Module):
 class SegAwareLoss(nn.Module):
     """
     Segmentation-aware loss function.
-    Applies different loss weights to hair/fur regions vs other regions.
+    Applies different loss weights to different semantic regions.
+    Supports binary (hair/other) and multi-class masks.
     """
     
     def __init__(
         self,
+        class_weights: Optional[list] = None,
         hair_weight: float = 1.0,
         other_weight: float = 1.0,
         use_perceptual: bool = False,
@@ -55,6 +57,7 @@ class SegAwareLoss(nn.Module):
     ):
         super().__init__()
         
+        self.class_weights = class_weights
         self.hair_weight = hair_weight
         self.other_weight = other_weight
         self.use_perceptual = use_perceptual
@@ -76,6 +79,23 @@ class SegAwareLoss(nn.Module):
                 param.requires_grad = False
             self.vgg_layers.eval()
 
+    def _prepare_masks(self, seg_map: torch.Tensor, num_classes: int) -> torch.Tensor:
+        """Convert seg_map to one-hot masks if needed."""
+        if seg_map.ndim == 3:
+            seg_map = seg_map.unsqueeze(1)
+            
+        if seg_map.shape[1] == 1:
+            if num_classes == 2:
+                # Optimized binary case
+                m1 = (seg_map > 0.5).float()
+                m0 = 1.0 - m1
+                return torch.cat([m0, m1], dim=1)
+            else:
+                # Multi-class index map
+                masks = F.one_hot(seg_map.squeeze(1).long(), num_classes=num_classes)
+                return masks.permute(0, 3, 1, 2).float()
+        return seg_map
+
     def forward(
         self,
         sr_output: torch.Tensor,
@@ -89,41 +109,40 @@ class SegAwareLoss(nn.Module):
             if seg_map.shape[2:] != (h_h, w_h):
                 seg_map = F.interpolate(seg_map, size=(h_h, w_h), mode='nearest')
 
-        # 2. Prepare seg_map
-        if seg_map.ndim == 3:
-            seg_map = seg_map.unsqueeze(1)
+        # 2. Determine weights and masks
+        weights = self.class_weights
+        if weights is None:
+            # Legacy fallback: [other, hair]
+            weights = [self.other_weight, self.hair_weight]
         
-        # Binary mask
-        hair_mask = (seg_map > 0.5).float()
-        other_mask = 1 - hair_mask
+        num_classes = len(weights)
+        masks = self._prepare_masks(seg_map, num_classes)
         
-        # Pixel loss
-        loss_hair = self.pixel_loss(sr_output * hair_mask, hr_target * hair_mask)
-        loss_other = self.pixel_loss(sr_output * other_mask, hr_target * other_mask)
+        # 3. Compute weighted pixel loss
+        loss = 0
+        for i in range(num_classes):
+            m = masks[:, i:i+1, :, :]
+            w = weights[i]
+            if w > 0:
+                loss += w * self.pixel_loss(sr_output * m, hr_target * m)
         
-        loss = (
-            self.hair_weight * loss_hair +
-            self.other_weight * loss_other
-        )
-        
-        # Perceptual loss
+        # 4. Perceptual loss
         if self.use_perceptual:
-            loss += self._perceptual_loss(sr_output, hr_target, hair_mask, other_mask)
+            loss += self._perceptual_loss_multi(sr_output, hr_target, masks, weights)
         
-        # SSIM loss
+        # 5. SSIM loss
         if self.use_ssim:
-            loss += self._ssim_loss(sr_output, hr_target, hair_mask, other_mask)
+            loss += self._ssim_loss_multi(sr_output, hr_target, masks, weights)
         
         return loss
     
-    def _perceptual_loss(
+    def _perceptual_loss_multi(
         self,
         sr: torch.Tensor,
         hr: torch.Tensor,
-        hair_mask: torch.Tensor,
-        other_mask: torch.Tensor
+        masks: torch.Tensor,
+        weights: list
     ) -> torch.Tensor:
-        # Legacy VGG16 implementation
         device = sr.device
         self.vgg_layers = self.vgg_layers.to(device)
         
@@ -132,20 +151,24 @@ class SegAwareLoss(nn.Module):
         sr_feat = self.vgg_layers(sr_clipped)
         hr_feat = self.vgg_layers(hr_clipped)
         
-        # Compute loss with masking
-        loss_hair = F.l1_loss(sr_feat * hair_mask[:, :, :sr_feat.size(2), :sr_feat.size(3)],
-                             hr_feat * hair_mask[:, :, :hr_feat.size(2), :hr_feat.size(3)])
-        loss_other = F.l1_loss(sr_feat * other_mask[:, :, :sr_feat.size(2), :sr_feat.size(3)],
-                              hr_feat * other_mask[:, :, :hr_feat.size(2), :hr_feat.size(3)])
+        fh, fw = sr_feat.shape[2:]
+        # Downsample masks to match feature map resolution
+        masks_f = F.interpolate(masks, size=(fh, fw), mode='nearest')
         
-        return 0.1 * (self.hair_weight * loss_hair + self.other_weight * loss_other)
+        loss = 0
+        for i, w in enumerate(weights):
+            if w > 0:
+                m = masks_f[:, i:i+1, :, :]
+                loss += w * F.l1_loss(sr_feat * m, hr_feat * m)
+        
+        return 0.1 * loss
     
-    def _ssim_loss(
+    def _ssim_loss_multi(
         self,
         sr: torch.Tensor,
         hr: torch.Tensor,
-        hair_mask: torch.Tensor,
-        other_mask: torch.Tensor
+        masks: torch.Tensor,
+        weights: list
     ) -> torch.Tensor:
         from piqa import SSIM
         ssim = SSIM().to(sr.device)
@@ -153,10 +176,14 @@ class SegAwareLoss(nn.Module):
         sr_clipped = torch.clamp(sr, 0, 1)
         hr_clipped = torch.clamp(hr, 0, 1)
         
-        hair_ssim = 1 - ssim(sr_clipped * hair_mask, hr_clipped * hair_mask)
-        other_ssim = 1 - ssim(sr_clipped * other_mask, hr_clipped * other_mask)
+        loss = 0
+        for i, w in enumerate(weights):
+            if w > 0:
+                m = masks[:, i:i+1, :, :]
+                # ssim computes per-image average; we mask the input images
+                loss += w * (1 - ssim(sr_clipped * m, hr_clipped * m))
         
-        return 0.2 * (self.hair_weight * hair_ssim + self.other_weight * other_ssim)
+        return 0.2 * loss
 
 class GANLoss(nn.Module):
     """
